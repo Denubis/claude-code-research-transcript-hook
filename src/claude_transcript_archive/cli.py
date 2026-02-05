@@ -158,6 +158,11 @@ function Div(elem)
     local new_env = speaker == 'user' and 'userturn' or 'assistantturn'
     table.insert(result, pandoc.RawBlock('latex', '\\begin{' .. new_env .. '}'))
 
+    -- Add the actual content of the div
+    for _, block in ipairs(elem.content) do
+      table.insert(result, block)
+    end
+
     current_speaker = speaker
     return result
   end
