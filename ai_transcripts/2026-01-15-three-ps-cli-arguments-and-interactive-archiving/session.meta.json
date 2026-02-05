@@ -1,0 +1,165 @@
+{
+  "schema_version": "1.0",
+  "session": {
+    "id": "8b2825a0-94a1-4870-8e8f-5d9191e445e6",
+    "started_at": "2026-01-14T02:31:55.411Z",
+    "ended_at": "2026-01-14T23:27:54.047Z",
+    "duration_minutes": 1255
+  },
+  "project": {
+    "name": "claude-code-transcript-hook",
+    "directory": "/home/brian/people/Brian/claude-code-transcript-hook"
+  },
+  "model": {
+    "provider": "anthropic",
+    "model_id": "claude-opus-4-5-20251101",
+    "access_method": "claude-code-cli"
+  },
+  "statistics": {
+    "turns": 263,
+    "human_messages": 263,
+    "assistant_messages": 370,
+    "thinking_blocks": 0,
+    "tool_calls": {
+      "total": 244,
+      "by_type": {
+        "Task": 1,
+        "AskUserQuestion": 21,
+        "Read": 54,
+        "WebFetch": 1,
+        "Bash": 53,
+        "Write": 13,
+        "Edit": 78,
+        "ExitPlanMode": 3,
+        "TodoWrite": 10,
+        "Grep": 10
+      }
+    },
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0
+    },
+    "estimated_cost_usd": 0.0
+  },
+  "artifacts": {
+    "created": [
+      {
+        "path": "/home/brian/.claude/plans/swift-exploring-marshmallow.md",
+        "type": "document"
+      },
+      {
+        "path": "CLAUDE.md",
+        "type": "document"
+      },
+      {
+        "path": "README.md",
+        "type": "document"
+      },
+      {
+        "path": "claude-commands/transcript.md",
+        "type": "document"
+      },
+      {
+        "path": "example-hooks/settings.local.json",
+        "type": "data"
+      },
+      {
+        "path": "pyproject.toml",
+        "type": "config"
+      },
+      {
+        "path": "src/claude_transcript_archive/cli.py",
+        "type": "code"
+      },
+      {
+        "path": "tests/__init__.py",
+        "type": "code"
+      },
+      {
+        "path": "tests/test_cli.py",
+        "type": "code"
+      }
+    ],
+    "modified": [],
+    "referenced": [
+      {
+        "path": "/home/brian/people/Brian/PromptGrimoire/pyproject.toml",
+        "type": "config"
+      },
+      {
+        "path": "ai_transcripts/2026-01-14-test-archive/session.meta.json",
+        "type": "data"
+      },
+      {
+        "path": "ai_transcripts/CATALOG.json",
+        "type": "data"
+      }
+    ]
+  },
+  "relationships": {
+    "continues": null,
+    "references": [
+      "8b2825a0-94a1-4870-8e8f-5d9191e445e6",
+      "a0688338-9813-403e-8878-ba6787757c87"
+    ],
+    "isPartOf": [
+      "claude-code-transcript-hook"
+    ]
+  },
+  "auto_generated": {
+    "title": "Three Ps CLI Arguments and Interactive Archiving",
+    "purpose": "",
+    "tags": []
+  },
+  "three_ps": {
+    "prompt_summary": "Add --prompt, --process, --provenance CLI arguments to the transcript archiver, update transcript.md to pass these interactively, fix test coverage issues",
+    "process_summary": "Edited cli.py, transcript.md, test_cli.py, CLAUDE.md, pyproject.toml; ran 88 tests passing at 78.90% coverage",
+    "provenance_summary": "Part of IDW2025 framework development - enabling research-grade transcript archiving with complete metadata"
+  },
+  "plan_files": [
+    "partitioned-petting-wand.md",
+    "tingly-sleeping-lecun.md",
+    "rippling-meandering-barto.md",
+    "misty-wibbling-bear.md",
+    "dynamic-stirring-bunny.md",
+    "imperative-dreaming-lovelace.md",
+    "declarative-noodling-thacker.md",
+    "swift-exploring-marshmallow.md",
+    "misty-kindling-snail.md",
+    "harmonic-nibbling-squid.md",
+    "hazy-zooming-eich.md",
+    "shiny-bouncing-hamster.md",
+    "polymorphic-hugging-boot.md",
+    "harmonic-swimming-dahl.md",
+    "snoopy-seeking-storm.md",
+    "spicy-conjuring-panda.md",
+    "mossy-snuggling-frost.md",
+    "merry-napping-tulip.md",
+    "cosmic-gathering-candle.md",
+    "stateless-dancing-plum.md",
+    "goofy-jingling-gosling.md"
+  ],
+  "archive": {
+    "archived_at": "2026-01-15T10:27:54.465839",
+    "directory_name": "2026-01-15-three-ps-cli-arguments-and-interactive-archiving",
+    "jsonl_path": "raw-transcript.jsonl",
+    "jsonl_sha256": "af9e12b4428e5630dc1325ae83fb698dec0deb6b319f6d8394f106b9882a0362",
+    "jsonl_bytes": 4055455,
+    "needs_review": false
+  },
+  "_relationship_hints": {
+    "continues_hint": null,
+    "references_hints": [
+      "8b2825a0-94a1-4870-8e8f-5d9191e445e6",
+      "a0688338-9813-403e-8878-ba6787757c87"
+    ],
+    "detection_notes": [
+      "Found session ID reference: 8b2825a0-94a1-4870-8e8f-5d9191e445e6",
+      "Found continuation language matching: 'continu(?:e|ing|ed)\\s+from'",
+      "Found session ID reference: a0688338-9813-403e-8878-ba6787757c87",
+      "Found continuation language matching: 'continu(?:e|ing|ed)\\s+from'",
+      "Found continuation language matching: 'previous\\s+session'"
+    ]
+  }
+}

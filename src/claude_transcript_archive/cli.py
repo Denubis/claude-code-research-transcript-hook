@@ -361,6 +361,7 @@ def extract_session_stats(content: str) -> dict[str, Any]:
         "tool_calls": {"total": 0, "by_type": {}},
         "tokens": {"input": 0, "output": 0, "cache_read": 0},
         "model": None,
+        "claude_code_version": None,
         "timestamps": [],
     }
 
@@ -413,6 +414,12 @@ def extract_session_stats(content: str) -> dict[str, Any]:
                 model = message.get("model")
                 if model:
                     stats["model"] = model
+
+        # Extract Claude Code version
+        if not stats["claude_code_version"]:
+            version = entry.get("version")
+            if version:
+                stats["claude_code_version"] = version
 
         # Extract token usage
         usage = entry.get("usage", {})
@@ -749,6 +756,7 @@ def create_session_metadata(
         "model": {
             "provider": "anthropic",
             "model_id": stats.get("model", "unknown"),
+            "claude_code_version": stats.get("claude_code_version"),
             "access_method": "claude-code-cli",
         },
         "statistics": {
@@ -936,6 +944,19 @@ def extract_conversation_messages(content: str) -> list[dict]:
                     continue
                 if text.startswith("<ide_"):
                     continue
+                # Skip skill injections (loaded skill content appears as user message)
+                if text.startswith("# ") and len(text) > 500:
+                    # Long markdown content starting with heading is likely a skill
+                    continue
+                if "<command-name>" in text or "<command-message>" in text:
+                    # Command invocation metadata
+                    continue
+                if "Base directory for this skill:" in text:
+                    # Skill loading metadata
+                    continue
+                if text.startswith("Launching skill:"):
+                    # Skill launch confirmation
+                    continue
                 messages.append({
                     "role": "user",
                     "text": text,
@@ -993,11 +1014,19 @@ def generate_conversation_markdown(
     if metadata:
         session = metadata.get("session", {})
         stats = metadata.get("statistics", {})
+        model_info = metadata.get("model", {})
+
         if session.get("started_at"):
             lines.append(f"**Date**: {session['started_at'][:10]}")
+        if model_info.get("model_id"):
+            lines.append(f"**Model**: {model_info['model_id']}")
+        if model_info.get("claude_code_version"):
+            lines.append(f"**Claude Code**: v{model_info['claude_code_version']}")
+        if session.get("duration_minutes"):
+            lines.append(f"**Duration**: {session['duration_minutes']} minutes")
         if stats.get("turns"):
             lines.append(f"**Turns**: {stats['turns']}")
-        if stats.get("estimated_cost_usd"):
+        if stats.get("estimated_cost_usd") and stats["estimated_cost_usd"] > 0:
             lines.append(f"**Estimated cost**: ${stats['estimated_cost_usd']:.2f}")
         lines.append("")
         lines.append("---")
@@ -1045,7 +1074,7 @@ def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
         f"<title>{html_module.escape(title)}</title>",
         "</head>",
         "<body>",
-        f"<h1>{html_module.escape(title)}</h1>",
+        # Note: Title comes from pandoc metadata, not <h1>, to avoid duplication
     ]
 
     for msg in messages:
@@ -1120,6 +1149,7 @@ def generate_conversation_pdf(
             f"--lua-filter={filter_path}",
             "-V", "documentclass=article",
             "-V", "papersize=a4",
+            f"--metadata=title:{title}",
             "-o", str(output_path),
         ]
 
