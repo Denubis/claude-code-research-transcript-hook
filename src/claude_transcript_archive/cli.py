@@ -1029,6 +1029,27 @@ def generate_conversation_markdown(
         if stats.get("estimated_cost_usd") and stats["estimated_cost_usd"] > 0:
             lines.append(f"**Estimated cost**: ${stats['estimated_cost_usd']:.2f}")
         lines.append("")
+
+        # Add Three Ps if available
+        three_ps = metadata.get("three_ps", {})
+        if three_ps:
+            prompt_summary = three_ps.get("prompt_summary", "")
+            process_summary = three_ps.get("process_summary", "")
+            provenance_summary = three_ps.get("provenance_summary", "")
+
+            if prompt_summary or process_summary or provenance_summary:
+                lines.append("## Three Ps (IDW2025)")
+                lines.append("")
+                if prompt_summary:
+                    lines.append(f"**Prompt**: {prompt_summary}")
+                    lines.append("")
+                if process_summary:
+                    lines.append(f"**Process**: {process_summary}")
+                    lines.append("")
+                if provenance_summary:
+                    lines.append(f"**Provenance**: {provenance_summary}")
+                    lines.append("")
+
         lines.append("---")
         lines.append("")
 
@@ -1123,6 +1144,26 @@ def generate_conversation_html_for_pdf(
             lines.append("<strong>Claude Code</strong>: " + html_module.escape(version) + "<br>")
         lines.append(f"<strong>Duration</strong>: {duration} minutes<br>")
         lines.append(f"<strong>Turns</strong>: {turns}</p>")
+
+        # Add Three Ps if available
+        three_ps = metadata.get("three_ps", {})
+        if three_ps:
+            prompt_summary = three_ps.get("prompt_summary", "")
+            process_summary = three_ps.get("process_summary", "")
+            provenance_summary = three_ps.get("provenance_summary", "")
+
+            if prompt_summary or process_summary or provenance_summary:
+                lines.append("<h2>Three Ps (IDW2025)</h2>")
+                if prompt_summary:
+                    safe_prompt = sanitize_for_pdf(prompt_summary)
+                    lines.append(f"<p><strong>Prompt</strong>: {html_module.escape(safe_prompt)}</p>")
+                if process_summary:
+                    safe_process = sanitize_for_pdf(process_summary)
+                    lines.append(f"<p><strong>Process</strong>: {html_module.escape(safe_process)}</p>")
+                if provenance_summary:
+                    safe_provenance = sanitize_for_pdf(provenance_summary)
+                    lines.append(f"<p><strong>Provenance</strong>: {html_module.escape(safe_provenance)}</p>")
+
         lines.append("<hr>")
 
     for msg in messages:
