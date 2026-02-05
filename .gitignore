@@ -43,3 +43,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Transcript archives (generated locally)
+ai_transcripts/
