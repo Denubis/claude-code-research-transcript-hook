@@ -1,6 +1,6 @@
 {
   "name": "transcript-archive",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Archive Claude Code conversations with research-grade metadata (IDW2025 framework) - generates HTML, markdown, and PDF exports",
 
   "author": {

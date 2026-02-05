@@ -1,6 +1,6 @@
 [project]
 name = "claude-research-transcript"
-version = "0.3.1"
+version = "0.3.2"
 description = "Archive Claude Code transcripts with research-grade metadata using the IDW2025 framework"
 readme = "README.md"
 requires-python = ">=3.10"

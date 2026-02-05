@@ -1059,6 +1059,29 @@ def generate_conversation_markdown(
     return "\n".join(lines)
 
 
+def sanitize_for_pdf(text: str) -> str:
+    """Remove characters that cause issues in LaTeX/PDF generation.
+
+    Removes control characters and other problematic Unicode while
+    preserving normal whitespace and printable characters.
+    """
+    if not text:
+        return text
+
+    # Remove control characters except tab, newline, carriage return
+    # Control chars are U+0000-U+001F and U+007F-U+009F
+    result = []
+    for char in text:
+        code = ord(char)
+        # Keep tab (9), newline (10), carriage return (13), and normal printable
+        if code == 9 or code == 10 or code == 13 or code >= 32:
+            # Also skip DEL (127) and C1 control chars (128-159)
+            if code != 127 and not (128 <= code <= 159):
+                result.append(char)
+
+    return "".join(result)
+
+
 def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
     """Generate HTML with speaker markers for pandoc PDF conversion.
 
@@ -1067,11 +1090,12 @@ def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
     """
     import html as html_module
 
+    safe_title = sanitize_for_pdf(title)
     lines = [
         "<!DOCTYPE html>",
         "<html>",
         "<head>",
-        f"<title>{html_module.escape(title)}</title>",
+        f"<title>{html_module.escape(safe_title)}</title>",
         "</head>",
         "<body>",
         # Note: Title comes from pandoc metadata, not <h1>, to avoid duplication
@@ -1079,7 +1103,7 @@ def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
 
     for msg in messages:
         role = msg["role"]
-        text = msg["text"]
+        text = sanitize_for_pdf(msg["text"])
         tool_calls = msg.get("tool_calls", [])
 
         # Open speaker div with data-speaker attribute
@@ -1100,7 +1124,8 @@ def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
             lines.append("<p><strong>Tools used:</strong></p>")
             lines.append("<ul>")
             for tc in tool_calls:
-                lines.append(f"<li>{html_module.escape(tc['summary'])}</li>")
+                summary = sanitize_for_pdf(tc["summary"])
+                lines.append(f"<li>{html_module.escape(summary)}</li>")
             lines.append("</ul>")
 
         lines.append("</div>")
@@ -1119,8 +1144,11 @@ def generate_conversation_pdf(
 
     Returns True on success, False on failure.
     """
+    # Sanitize title for LaTeX
+    safe_title = sanitize_for_pdf(title)
+
     # Generate HTML with speaker markers
-    html_content = generate_conversation_html_for_pdf(messages, title)
+    html_content = generate_conversation_html_for_pdf(messages, safe_title)
 
     # Write temporary files for pandoc
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1149,7 +1177,7 @@ def generate_conversation_pdf(
             f"--lua-filter={filter_path}",
             "-V", "documentclass=article",
             "-V", "papersize=a4",
-            f"--metadata=title:{title}",
+            f"--metadata=title:{safe_title}",
             "-o", str(output_path),
         ]
 
