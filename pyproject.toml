@@ -1,0 +1,104 @@
+[project]
+name = "claude-research-transcript"
+version = "0.1.0"
+description = "Archive Claude Code transcripts with research-grade metadata using the IDW2025 framework"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Brian Ballsun-Stanton", email = "brian.ballsun-stanton@mq.edu.au" }
+]
+keywords = ["claude", "anthropic", "transcript", "archive", "research", "reproducibility"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "claude-code-transcripts>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+]
+
+[project.scripts]
+claude-research-transcript = "claude_transcript_archive.cli:main"
+claude-transcript-archive = "claude_transcript_archive.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Denubis/claude-code-research-transcript-hook"
+Repository = "https://github.com/Denubis/claude-code-research-transcript-hook"
+Issues = "https://github.com/Denubis/claude-code-research-transcript-hook/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_transcript_archive"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "PTH",    # flake8-use-pathlib
+    "PL",     # Pylint
+    "RUF",    # Ruff-specific
+]
+ignore = [
+    "PLR0913",  # Too many arguments
+    "PLR2004",  # Magic value comparison
+    "PLR0912",  # Too many branches - complex parsing logic
+    "PLR0915",  # Too many statements - complex archive logic
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["claude_transcript_archive"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --cov=src/claude_transcript_archive --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["src/claude_transcript_archive"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+# Note: main() function runs in subprocess during tests, so coverage not captured
+# Core functions have 85%+ coverage; 78% threshold accounts for subprocess testing
+fail_under = 78
