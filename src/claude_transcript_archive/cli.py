@@ -1082,7 +1082,11 @@ def sanitize_for_pdf(text: str) -> str:
     return "".join(result)
 
 
-def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
+def generate_conversation_html_for_pdf(
+    messages: list[dict],
+    title: str,
+    metadata: dict[str, Any] | None = None,
+) -> str:
     """Generate HTML with speaker markers for pandoc PDF conversion.
 
     Uses data-speaker attributes that the Lua filter converts to
@@ -1100,6 +1104,26 @@ def generate_conversation_html_for_pdf(messages: list[dict], title: str) -> str:
         "<body>",
         # Note: Title comes from pandoc metadata, not <h1>, to avoid duplication
     ]
+
+    # Add metadata header if available
+    if metadata:
+        session = metadata.get("session", {})
+        model_info = metadata.get("model", {})
+        stats = metadata.get("statistics", {})
+
+        date_str = session.get("started_at", "")[:10] if session.get("started_at") else ""
+        model_id = model_info.get("model_id", "unknown")
+        version = model_info.get("claude_code_version", "")
+        duration = session.get("duration_minutes", 0)
+        turns = stats.get("turns", 0)
+
+        lines.append("<p><strong>Date</strong>: " + html_module.escape(date_str) + "<br>")
+        lines.append("<strong>Model</strong>: " + html_module.escape(model_id) + "<br>")
+        if version:
+            lines.append("<strong>Claude Code</strong>: " + html_module.escape(version) + "<br>")
+        lines.append(f"<strong>Duration</strong>: {duration} minutes<br>")
+        lines.append(f"<strong>Turns</strong>: {turns}</p>")
+        lines.append("<hr>")
 
     for msg in messages:
         role = msg["role"]
@@ -1139,6 +1163,7 @@ def generate_conversation_pdf(
     title: str,
     output_path: Path,
     quiet: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Generate PDF from conversation using pandoc with speaker styling.
 
@@ -1148,7 +1173,7 @@ def generate_conversation_pdf(
     safe_title = sanitize_for_pdf(title)
 
     # Generate HTML with speaker markers
-    html_content = generate_conversation_html_for_pdf(messages, safe_title)
+    html_content = generate_conversation_html_for_pdf(messages, safe_title, metadata)
 
     # Write temporary files for pandoc
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1384,6 +1409,7 @@ def archive(
                 title,
                 pdf_path,
                 quiet=quiet,
+                metadata=metadata,
             ):
                 log_info(f"Generated: {pdf_path}", quiet)
 
