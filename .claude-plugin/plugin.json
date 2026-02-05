@@ -1,0 +1,23 @@
+{
+  "name": "transcript-archive",
+  "version": "0.2.1",
+  "description": "Archive Claude Code conversations with research-grade metadata (IDW2025 framework) - generates HTML, markdown, and PDF exports",
+
+  "author": {
+    "name": "Brian Ballsun-Stanton",
+    "url": "https://github.com/Denubis"
+  },
+
+  "homepage": "https://github.com/Denubis/claude-code-research-transcript-hook",
+  "repository": "https://github.com/Denubis/claude-code-research-transcript-hook",
+  "license": "MIT",
+  "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"],
+
+  "commands": [
+    "./commands/transcript.md"
+  ],
+
+  "skills": [
+    "./skills/transcript/SKILL.md"
+  ]
+}
