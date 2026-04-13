@@ -398,5 +398,90 @@ def status(
         typer.echo(f"  Total:       {len(archived) + len(unarchived)} sessions")
 
 
+@app.command()
+def bulk(
+    local: bool = typer.Option(False, help="Archive to ./ai_transcripts/"),
+    output: str | None = typer.Option(None, help="Custom output directory"),
+    quiet: bool = typer.Option(False, help="Suppress output"),
+):
+    """Archive all unarchived sessions in bulk."""
+    try:
+        _discovery.resolve_worktrees()
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    sessions = _discovery.discover_sessions()
+    if not sessions:
+        if not quiet:
+            typer.echo("No sessions found.")
+        return
+
+    # Determine archive location
+    project_dir = _discovery.get_project_dir_from_transcript(sessions[0][0])
+    defaults = _discovery.load_project_defaults(project_dir)
+    target = defaults.get("target")
+
+    # CLI flags override defaults
+    if local or output:
+        target = None
+
+    if target == "branch":
+        try:
+            repo_root = Path(
+                subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip()
+            )
+        except subprocess.CalledProcessError:
+            repo_root = Path.cwd()
+        archive_dir = repo_root / ".ai-transcripts"
+    else:
+        archive_dir = _discovery.get_archive_dir(
+            local=local,
+            output=output,
+            project_dir=project_dir if not local else None,
+        )
+
+    manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}
+
+    # Filter to unarchived sessions
+    unarchived = [(tp, sid) for tp, sid in sessions if sid not in manifest]
+
+    if not unarchived:
+        if not quiet:
+            typer.echo("All sessions already archived.")
+        return
+
+    archived_count = 0
+    trivial_count = 0
+
+    for transcript_path, session_id in unarchived:
+        content = transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
+        classification = _metadata.classify_session(content)
+
+        if classification == "trivial":
+            trivial_count += 1
+
+        result = _archive.archive(
+            session_id,
+            transcript_path,
+            archive_dir,
+            quiet=quiet,
+            target=target,
+        )
+        if result:
+            archived_count += 1
+
+    if not quiet:
+        typer.echo(
+            f"Bulk archive complete: {archived_count} archived"
+            f" ({trivial_count} trivial), {len(sessions) - len(unarchived)} already archived"
+        )
+
+
 if __name__ == "__main__":
     app()
