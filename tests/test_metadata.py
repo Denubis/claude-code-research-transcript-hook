@@ -5,6 +5,7 @@ from pathlib import Path
 
 from claude_transcript_archive.metadata import (
     SCHEMA_VERSION,
+    classify_session,
     create_session_metadata,
     detect_relationship_hints,
     estimate_cost,
@@ -354,3 +355,41 @@ class TestCreateSessionMetadata:
         assert metadata["auto_generated"]["title"] == "Test Title"
         assert metadata["archive"]["needs_review"] is False
         assert "plan.md" in metadata["plan_files"]
+
+
+# =============================================================================
+# Test classify_session
+# =============================================================================
+
+
+class TestClassifySession:
+    def _make_assistant_lines(self, count: int) -> str:
+        """Build JSONL content with the given number of assistant messages."""
+        lines = []
+        for i in range(count):
+            entry = {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": f"msg {i}"},
+            }
+            lines.append(json.dumps(entry))
+        return "\n".join(lines)
+
+    def test_trivial_few_messages(self):
+        """AC5.3: < 5 assistant messages = trivial."""
+        content = self._make_assistant_lines(3)
+        assert classify_session(content) == "trivial"
+
+    def test_substantial_many_messages(self):
+        """>= 5 assistant messages = substantial."""
+        content = self._make_assistant_lines(10)
+        assert classify_session(content) == "substantial"
+
+    def test_empty_content_trivial(self):
+        assert classify_session("") == "trivial"
+
+    def test_malformed_jsonl_trivial(self):
+        assert classify_session("not json\nalso not json") == "trivial"
+
+    def test_exactly_five_is_substantial(self):
+        content = self._make_assistant_lines(5)
+        assert classify_session(content) == "substantial"

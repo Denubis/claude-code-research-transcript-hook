@@ -58,6 +58,27 @@ OUTPUT_PRICE_PER_M = 15.0
 CACHE_PRICE_PER_M = 0.30
 
 
+def classify_session(content: str) -> str:
+    """Classify a session as trivial or substantial.
+
+    Counts assistant messages in JSONL content.
+    Returns "trivial" if < 5 assistant messages, "substantial" otherwise.
+    """
+    assistant_count = 0
+    for line in content.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        role = entry.get("message", {}).get("role", "")
+        entry_type = entry.get("type", "")
+        if role == "assistant" or entry_type == "assistant":
+            assistant_count += 1
+    return "trivial" if assistant_count < 5 else "substantial"
+
+
 def extract_session_stats(content: str) -> dict[str, Any]:
     """Extract rich metadata from transcript JSONL."""
     stats: dict[str, Any] = {
