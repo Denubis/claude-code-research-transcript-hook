@@ -1,6 +1,7 @@
 """Tests for claude_transcript_archive.discovery module."""
 
 import importlib
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from claude_transcript_archive.discovery import (
     get_archive_dir,
     get_cc_project_path,
     get_project_dir_from_transcript,
+    load_project_defaults,
     resolve_worktrees,
 )
 
@@ -329,3 +331,68 @@ class TestDiscoverSessions:
         )
         result = discover_sessions()
         assert result == []
+
+
+# =============================================================================
+# Test load_project_defaults
+# =============================================================================
+
+
+class TestLoadProjectDefaults:
+    def test_loads_defaults_file(self, temp_dir):
+        """AC5.2: Returns values from .claude/transcript-defaults.json."""
+        defaults_dir = temp_dir / ".claude"
+        defaults_dir.mkdir(parents=True)
+        defaults_file = defaults_dir / "transcript-defaults.json"
+        defaults_file.write_text(json.dumps({
+            "tags": ["research"],
+            "purpose": "Testing",
+        }))
+        # Create .git to mark root
+        (temp_dir / ".git").mkdir()
+
+        result = load_project_defaults(temp_dir)
+        assert result["tags"] == ["research"]
+        assert result["purpose"] == "Testing"
+
+    def test_missing_file_returns_empty(self, temp_dir):
+        (temp_dir / ".git").mkdir()
+        result = load_project_defaults(temp_dir)
+        assert result == {}
+
+    def test_malformed_json_returns_empty(self, temp_dir, capsys):
+        defaults_dir = temp_dir / ".claude"
+        defaults_dir.mkdir(parents=True)
+        (defaults_dir / "transcript-defaults.json").write_text("not json{{{")
+        (temp_dir / ".git").mkdir()
+
+        result = load_project_defaults(temp_dir)
+        assert result == {}
+        captured = capsys.readouterr()
+        assert "warning" in captured.err.lower() or "malformed" in captured.err.lower()
+
+    def test_none_project_dir_returns_empty(self):
+        result = load_project_defaults(None)
+        assert result == {}
+
+    def test_walks_up_to_git_root(self, temp_dir):
+        """Finds defaults in parent directory."""
+        (temp_dir / ".git").mkdir()
+        defaults_dir = temp_dir / ".claude"
+        defaults_dir.mkdir(parents=True)
+        (defaults_dir / "transcript-defaults.json").write_text('{"purpose": "found"}')
+
+        subdir = temp_dir / "src" / "deep"
+        subdir.mkdir(parents=True)
+
+        result = load_project_defaults(subdir)
+        assert result.get("purpose") == "found"
+
+    def test_unknown_keys_preserved(self, temp_dir):
+        defaults_dir = temp_dir / ".claude"
+        defaults_dir.mkdir(parents=True)
+        (defaults_dir / "transcript-defaults.json").write_text('{"future_key": "value"}')
+        (temp_dir / ".git").mkdir()
+
+        result = load_project_defaults(temp_dir)
+        assert result["future_key"] == "value"

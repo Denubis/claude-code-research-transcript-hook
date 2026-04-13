@@ -1,6 +1,8 @@
 """Path encoding, worktree resolution, session discovery, and project defaults."""
 
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -219,3 +221,40 @@ def auto_discover_transcript() -> tuple[Path, str] | None:
     session_id = transcript_path.stem
 
     return transcript_path, session_id
+
+
+def load_project_defaults(project_dir: Path | None = None) -> dict:
+    """Load project-level transcript defaults from .claude/transcript-defaults.json.
+
+    Searches from project_dir upward to git root for the defaults file.
+    Returns parsed dict if found, empty dict otherwise.
+    Unknown keys are preserved (forward compatibility).
+    Malformed JSON returns empty dict with warning to stderr.
+    """
+    if project_dir is None:
+        return {}
+
+    current = project_dir.resolve()
+    while True:
+        defaults_file = current / ".claude" / "transcript-defaults.json"
+        if defaults_file.is_file():
+            try:
+                return json.loads(defaults_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, ValueError):
+                print(
+                    f"Warning: Malformed JSON in {defaults_file}",
+                    file=sys.stderr,
+                )
+                return {}
+
+        # Stop at git root
+        if (current / ".git").exists():
+            break
+
+        parent = current.parent
+        if parent == current:
+            # Reached filesystem root
+            break
+        current = parent
+
+    return {}
