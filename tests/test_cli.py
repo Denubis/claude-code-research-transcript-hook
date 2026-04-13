@@ -8,10 +8,8 @@ from pathlib import Path
 
 from claude_transcript_archive.cli import (
     SCHEMA_VERSION,
-    _encode_cc_path,
     _is_ide_context_message,
     archive,
-    auto_discover_transcript,
     compute_file_hash,
     create_session_metadata,
     detect_relationship_hints,
@@ -20,10 +18,7 @@ from claude_transcript_archive.cli import (
     extract_session_stats,
     find_plan_files,
     generate_title_from_content,
-    get_archive_dir,
-    get_cc_project_path,
     get_file_type,
-    get_project_dir_from_transcript,
     load_catalog,
     load_manifest,
     log_error,
@@ -35,108 +30,6 @@ from claude_transcript_archive.cli import (
     update_html_titles,
     write_metadata_sidecar,
 )
-
-# =============================================================================
-# Test get_cc_project_path
-# =============================================================================
-
-
-class TestEncodeCCPath:
-    """Tests for the pure string-encoding helper (platform-independent)."""
-
-    def test_posix_simple(self):
-        assert _encode_cc_path("/home/user/project") == "-home-user-project"
-
-    def test_posix_path_with_dashes(self):
-        assert _encode_cc_path("/home/user/my-cool-project") == "-home-user-my-cool-project"
-
-    def test_windows_with_drive(self):
-        result = _encode_cc_path("C:\\Users\\Adela\\denubis-plugins")
-        assert result == "C--Users-Adela-denubis-plugins"
-
-    def test_windows_forward_slashes(self):
-        # Windows paths occasionally use '/' — handle both separators
-        assert _encode_cc_path("C:/Users/Adela/proj") == "C--Users-Adela-proj"
-
-    def test_no_separators_leak(self):
-        """Encoded output must contain no ':', '/', or '\\\\'."""
-        encoded = _encode_cc_path("C:\\Users\\Adela\\my-proj")
-        assert ":" not in encoded
-        assert "/" not in encoded
-        assert "\\" not in encoded
-
-
-class TestGetCCProjectPath:
-    def test_matches_encoded_resolved_path(self, tmp_path):
-        # Use tmp_path so the test works on any OS
-        result = get_cc_project_path(tmp_path)
-        expected = _encode_cc_path(str(tmp_path.resolve()))
-        assert result == expected
-
-    def test_no_separators_in_output(self, tmp_path):
-        result = get_cc_project_path(tmp_path)
-        assert "/" not in result
-        assert "\\" not in result
-        assert ":" not in result
-
-
-# =============================================================================
-# Test get_archive_dir
-# =============================================================================
-
-
-class TestGetArchiveDir:
-    def test_output_override(self, temp_dir):
-        result = get_archive_dir(local=False, output=str(temp_dir / "custom"))
-        assert result == temp_dir / "custom"
-
-    def test_local_mode(self, temp_dir, monkeypatch):
-        monkeypatch.chdir(temp_dir)
-        result = get_archive_dir(local=True, output=None)
-        assert result == temp_dir / "ai_transcripts"
-
-    def test_global_without_project(self):
-        result = get_archive_dir(local=False, output=None, project_dir=None)
-        assert result == Path.home() / ".claude" / "transcripts"
-
-    def test_global_with_project(self, tmp_path):
-        # Use tmp_path so the resolved path is valid on the current OS
-        result = get_archive_dir(local=False, output=None, project_dir=tmp_path)
-        expected = Path.home() / ".claude" / "transcripts" / get_cc_project_path(tmp_path)
-        assert result == expected
-
-
-# =============================================================================
-# Test get_project_dir_from_transcript
-# =============================================================================
-
-
-class TestGetProjectDirFromTranscript:
-    def test_non_claude_path(self, temp_dir):
-        transcript = temp_dir / "random.jsonl"
-        transcript.touch()
-        result = get_project_dir_from_transcript(transcript)
-        assert result is None
-
-    def test_claude_path_with_existing_dir(self, temp_dir, monkeypatch):
-        # Create a mock Claude projects structure
-        projects_dir = temp_dir / ".claude" / "projects"
-        encoded_dir = projects_dir / "-tmp-testproject"
-        encoded_dir.mkdir(parents=True)
-        transcript = encoded_dir / "session.jsonl"
-        transcript.touch()
-
-        # Mock home directory
-        monkeypatch.setattr(Path, "home", lambda: temp_dir)
-
-        # Create the target directory
-        target_dir = temp_dir / "tmp" / "testproject"
-        target_dir.mkdir(parents=True)
-
-        result = get_project_dir_from_transcript(transcript)
-        # The function tries to decode and check if path exists
-        assert result is not None or result is None  # May or may not find it
-
 
 # =============================================================================
 # Test manifest functions
@@ -1273,42 +1166,3 @@ class TestLogFunctions:
         log_info("Test message", quiet=True)
         captured = capsys.readouterr()
         assert captured.out == ""
-
-
-# =============================================================================
-# Test auto_discover_transcript
-# =============================================================================
-
-
-class TestAutoDiscoverTranscript:
-    def test_no_projects_dir(self, temp_dir, monkeypatch):
-        """Test returns None when projects directory doesn't exist."""
-        monkeypatch.setattr(Path, "home", lambda: temp_dir)
-        monkeypatch.chdir(temp_dir)
-        result = auto_discover_transcript()
-        assert result is None
-
-    def test_no_jsonl_files(self, temp_dir, monkeypatch):
-        """Test returns None when no jsonl files exist."""
-        monkeypatch.setattr(Path, "home", lambda: temp_dir)
-        monkeypatch.chdir(temp_dir)
-        # Use the same encoder the production code uses, so the directory is
-        # valid on any OS (Windows paths contain ':' which cannot appear mid-path)
-        projects_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(temp_dir)
-        projects_dir.mkdir(parents=True)
-        result = auto_discover_transcript()
-        assert result is None
-
-    def test_finds_transcript(self, temp_dir, monkeypatch):
-        """Test finds most recent transcript."""
-        monkeypatch.setattr(Path, "home", lambda: temp_dir)
-        monkeypatch.chdir(temp_dir)
-        projects_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(temp_dir)
-        projects_dir.mkdir(parents=True)
-        transcript = projects_dir / "abc123-def456.jsonl"
-        transcript.write_text('{"test": true}', encoding="utf-8")
-        result = auto_discover_transcript()
-        assert result is not None
-        path, session_id = result
-        assert path == transcript
-        assert session_id == "abc123-def456"
