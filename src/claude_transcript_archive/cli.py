@@ -484,5 +484,123 @@ def bulk(
         )
 
 
+@app.command()
+def update(
+    session_id: str | None = typer.Option(None, "--session-id", help="Session ID to update"),
+    all_needs_review: bool = typer.Option(
+        False, "--all-needs-review", help="Update all sessions needing review"
+    ),
+    title: str | None = typer.Option(None, "--title", help="New title"),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
+    purpose: str | None = typer.Option(None, "--purpose", help="Purpose description"),
+    prompt: str | None = typer.Option(None, "--prompt", help="Three Ps: Prompt summary"),
+    process: str | None = typer.Option(None, "--process", help="Three Ps: Process summary"),
+    provenance: str | None = typer.Option(
+        None, "--provenance", help="Three Ps: Provenance summary"
+    ),
+    quiet: bool = typer.Option(False, help="Suppress output"),
+):
+    """Update metadata on existing archived sessions."""
+    if not session_id and not all_needs_review:
+        typer.echo("Error: provide --session-id or --all-needs-review", err=True)
+        raise typer.Exit(code=1)
+
+    # Resolve archive directory
+    try:
+        repo_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError:
+        repo_root = Path.cwd()
+
+    project_dir = repo_root  # assume current repo
+    defaults = _discovery.load_project_defaults(project_dir)
+    target = defaults.get("target", "branch")
+
+    if target == "branch":
+        archive_dir = repo_root / ".ai-transcripts"
+    else:
+        archive_dir = _discovery.get_archive_dir(
+            local=(target == "here"),
+            output=None,
+            project_dir=project_dir,
+        )
+
+    if not archive_dir.exists():
+        typer.echo("Error: no archive found. Run 'init' first.", err=True)
+        raise typer.Exit(code=1)
+
+    manifest = _catalog.load_manifest(archive_dir)
+
+    # Collect target sessions
+    target_sessions = []
+    if session_id:
+        if session_id not in manifest:
+            typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
+            raise typer.Exit(code=1)
+        target_sessions.append((session_id, Path(manifest[session_id])))
+    elif all_needs_review:
+        for sid, dir_str in manifest.items():
+            sidecar_path = Path(dir_str) / "session.meta.json"
+            if sidecar_path.exists():
+                try:
+                    meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                    if meta.get("archive", {}).get("needs_review", True):
+                        target_sessions.append((sid, Path(dir_str)))
+                except json.JSONDecodeError:
+                    continue
+
+    if not target_sessions:
+        if not quiet:
+            typer.echo("No sessions to update.")
+        return
+
+    updated_count = 0
+    for _sid, session_dir in target_sessions:
+        sidecar_path = session_dir / "session.meta.json"
+        if not sidecar_path.exists():
+            continue
+
+        meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+        # Apply updates
+        if title:
+            meta.setdefault("auto_generated", {})["title"] = title
+        if tags:
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+            meta.setdefault("auto_generated", {})["tags"] = tag_list
+        if purpose:
+            meta.setdefault("auto_generated", {})["purpose"] = purpose
+        if prompt:
+            meta.setdefault("three_ps", {})["prompt_summary"] = prompt
+        if process:
+            meta.setdefault("three_ps", {})["process_summary"] = process
+        if provenance:
+            meta.setdefault("three_ps", {})["provenance_summary"] = provenance
+
+        # If all Three Ps provided, mark as reviewed
+        three_ps = meta.get("three_ps", {})
+        if (
+            three_ps.get("prompt_summary")
+            and three_ps.get("process_summary")
+            and three_ps.get("provenance_summary")
+        ):
+            meta.setdefault("archive", {})["needs_review"] = False
+
+        sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        updated_count += 1
+
+    # Rebuild indexes after modifications
+    _catalog.rebuild_indexes(archive_dir)
+
+    if not quiet:
+        typer.echo(f"Updated {updated_count} session(s)")
+
+
 if __name__ == "__main__":
     app()
