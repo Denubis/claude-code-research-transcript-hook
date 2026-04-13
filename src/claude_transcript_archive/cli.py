@@ -4,6 +4,7 @@
 Typer-based CLI that dispatches to the archive module.
 """
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from claude_transcript_archive import archive as _archive
 from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive import discovery as _discovery
 from claude_transcript_archive import metadata as _metadata
+from claude_transcript_archive import output as _output
 
 app = typer.Typer(
     help="Archive Claude Code transcripts with research-grade metadata",
@@ -600,6 +602,123 @@ def update(
 
     if not quiet:
         typer.echo(f"Updated {updated_count} session(s)")
+
+
+@app.command()
+def regenerate(
+    session_id: str | None = typer.Option(None, "--session-id", help="Session to regenerate"),
+    all_sessions: bool = typer.Option(False, "--all", help="Regenerate all archived sessions"),
+    quiet: bool = typer.Option(False, help="Suppress output"),
+):
+    """Re-render output files from raw transcript backups."""
+    if not session_id and not all_sessions:
+        typer.echo("Error: provide --session-id or --all", err=True)
+        raise typer.Exit(code=1)
+
+    # Resolve archive directory (same pattern as update command)
+    try:
+        repo_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError:
+        repo_root = Path.cwd()
+
+    project_dir = repo_root
+    defaults = _discovery.load_project_defaults(project_dir)
+    target = defaults.get("target", "branch")
+
+    if target == "branch":
+        archive_dir = repo_root / ".ai-transcripts"
+    else:
+        archive_dir = _discovery.get_archive_dir(
+            local=(target == "here"),
+            output=None,
+            project_dir=project_dir,
+        )
+
+    if not archive_dir.exists():
+        typer.echo("Error: no archive found. Run 'init' first.", err=True)
+        raise typer.Exit(code=1)
+
+    manifest = _catalog.load_manifest(archive_dir)
+
+    # Collect target sessions
+    target_dirs = []
+    if session_id:
+        if session_id not in manifest:
+            typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
+            raise typer.Exit(code=1)
+        target_dirs.append(Path(manifest[session_id]))
+    elif all_sessions:
+        target_dirs = [Path(d) for d in manifest.values()]
+
+    regenerated = 0
+    for session_dir in target_dirs:
+        raw_path = session_dir / "raw-transcript.jsonl"
+        if not raw_path.exists():
+            if not quiet:
+                typer.echo(f"Warning: no raw-transcript.jsonl in {session_dir.name}, skipping")
+            continue
+
+        content = raw_path.read_text(encoding="utf-8")
+
+        # Read title from sidecar or .title file
+        title = "Untitled"
+        metadata = None
+        sidecar_path = session_dir / "session.meta.json"
+        if sidecar_path.exists():
+            try:
+                meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                title = meta.get("auto_generated", {}).get("title", title)
+                metadata = meta
+            except json.JSONDecodeError:
+                pass
+        title_file = session_dir / ".title"
+        if title_file.exists():
+            title = title_file.read_text(encoding="utf-8").strip() or title
+
+        # Re-render HTML via claude-code-transcripts
+        with contextlib.suppress(FileNotFoundError):
+            subprocess.run(
+                [
+                    "claude-code-transcripts",
+                    "json",
+                    str(raw_path),
+                    "-o",
+                    str(session_dir),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        # Update HTML titles
+        _output.update_html_titles(session_dir, title)
+
+        # Re-render markdown
+        messages = _output.extract_conversation_messages(content)
+        if messages:
+            md_content = _output.generate_conversation_markdown(
+                messages, title, metadata=metadata
+            )
+            (session_dir / "conversation.md").write_text(md_content, encoding="utf-8")
+
+            # Re-render PDF
+            pdf_path = session_dir / "conversation.pdf"
+            _output.generate_conversation_pdf(
+                messages, title, pdf_path, quiet=quiet, metadata=metadata
+            )
+
+        regenerated += 1
+
+    if not quiet:
+        typer.echo(f"Regenerated {regenerated} session(s)")
 
 
 if __name__ == "__main__":
