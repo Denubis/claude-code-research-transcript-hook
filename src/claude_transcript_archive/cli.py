@@ -5,6 +5,7 @@ Typer-based CLI that dispatches to the archive module.
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -101,6 +102,103 @@ def archive(
     if output_dir:
         _archive.log_info(f"Archived to: {output_dir}", quiet)
         _archive.log_info(f"View transcript: {output_dir / 'index.html'}", quiet)
+
+
+@app.command()
+def init(
+    _non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="Skip interactive prompts"
+    ),
+):
+    """Initialize transcript archiving for this repository.
+
+    Creates an orphan 'transcripts' branch, mounts a worktree at .ai-transcripts/,
+    and adds it to .gitignore. Safe to run multiple times (idempotent).
+    """
+    # Step 1: Verify git repo
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        repo_root = Path(result.stdout.strip())
+    except subprocess.CalledProcessError as err:
+        typer.echo("Error: not a git repository. Run 'git init' first.", err=True)
+        raise typer.Exit(code=1) from err
+
+    # Step 2: Check/create orphan branch
+    branch_check = subprocess.run(
+        ["git", "branch", "--list", "transcripts"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if not branch_check.stdout.strip():
+        # Save current branch
+        current = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        saved_branch = current.stdout.strip()
+
+        try:
+            subprocess.run(
+                ["git", "switch", "--orphan", "transcripts"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init transcript archive"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        finally:
+            subprocess.run(
+                ["git", "switch", saved_branch],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        typer.echo("Created orphan branch 'transcripts'")
+    else:
+        typer.echo("transcripts branch already exists")
+
+    # Step 3: Check/mount worktree
+    worktree_dir = repo_root / ".ai-transcripts"
+    if not worktree_dir.exists():
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree_dir), "transcripts"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        typer.echo(f"Mounted worktree at {worktree_dir}")
+    else:
+        typer.echo("worktree already mounted at .ai-transcripts/")
+
+    # Step 4: Check/update .gitignore
+    gitignore_path = repo_root / ".gitignore"
+    existing = gitignore_path.read_text() if gitignore_path.exists() else ""
+    if not any(line.strip() == ".ai-transcripts/" for line in existing.splitlines()):
+        with gitignore_path.open("a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(".ai-transcripts/\n")
+        typer.echo("Added .ai-transcripts/ to .gitignore")
+    else:
+        typer.echo(".ai-transcripts/ already in .gitignore")
 
 
 if __name__ == "__main__":

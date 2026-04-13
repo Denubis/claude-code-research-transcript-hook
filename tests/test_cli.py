@@ -60,7 +60,10 @@ class TestCLIIntegration:
     def test_partial_cli_args(self):
         """Test that providing only --transcript without --session-id fails."""
         result = subprocess.run(
-            [sys.executable, "-m", "claude_transcript_archive.cli", "--transcript", "/tmp/x.jsonl"],
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "archive", "--transcript", "/tmp/x.jsonl",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -73,7 +76,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", "/nonexistent/file.jsonl",
+                "archive", "--transcript", "/nonexistent/file.jsonl",
                 "--session-id", "test-123",
             ],
             capture_output=True,
@@ -92,7 +95,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", str(transcript),
+                "archive", "--transcript", str(transcript),
                 "--session-id", "test-123",
                 "--local",
                 "--prompt", "Test prompt summary",
@@ -131,7 +134,7 @@ class TestCLIIntegration:
         })
 
         result = subprocess.run(
-            [sys.executable, "-m", "claude_transcript_archive.cli", "--local"],
+            [sys.executable, "-m", "claude_transcript_archive.cli", "archive", "--local"],
             input=stdin_input,
             capture_output=True,
             text=True,
@@ -150,7 +153,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", "/nonexistent/file.jsonl",
+                "archive", "--transcript", "/nonexistent/file.jsonl",
                 "--session-id", "test-123",
                 "--quiet",
             ],
@@ -171,7 +174,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", str(transcript),
+                "archive", "--transcript", str(transcript),
                 "--session-id", "test-123",
                 "--local",
             ],
@@ -186,7 +189,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", str(transcript),
+                "archive", "--transcript", str(transcript),
                 "--session-id", "test-123",
                 "--local",
                 "--force",
@@ -207,7 +210,7 @@ class TestCLIIntegration:
         result = subprocess.run(
             [
                 sys.executable, "-m", "claude_transcript_archive.cli",
-                "--transcript", str(transcript),
+                "archive", "--transcript", str(transcript),
                 "--session-id", "test-123",
                 "--output", str(custom_output),
             ],
