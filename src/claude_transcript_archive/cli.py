@@ -49,6 +49,13 @@ def _resolve_archive_dir() -> Path:
     )
 
 
+def _parse_tags(tags: str | None) -> list[str] | None:
+    """Parse comma-separated tags string into a list."""
+    if not tags:
+        return None
+    return [t.strip() for t in tags.split(",") if t.strip()]
+
+
 @app.command()
 def archive(
     title: str | None = typer.Option(None, help="Title to use"),
@@ -113,7 +120,7 @@ def archive(
     defaults = _discovery.load_project_defaults(project_dir)
 
     # Merge tags/purpose with project defaults
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tag_list = _parse_tags(tags)
     merged_tags = tag_list or defaults.get("tags", [])
     merged_purpose = purpose or defaults.get("purpose", "")
 
@@ -466,7 +473,7 @@ def bulk(
     target = defaults.get("target")
 
     # Merge tags/purpose with project defaults
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tag_list = _parse_tags(tags)
     merged_tags = tag_list or defaults.get("tags", [])
     merged_purpose = purpose or defaults.get("purpose", "")
 
@@ -585,7 +592,7 @@ def update(
             typer.echo("No sessions to update.")
         return
 
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    tag_list = _parse_tags(tags)
     updated_count = sum(
         _archive.update_metadata(
             session_dir,

@@ -160,7 +160,7 @@ class TestFullLifecycle:
         assert sidecar["auto_generated"]["tags"] == ["test", "integration"]
         assert sidecar["auto_generated"]["purpose"] == "Lifecycle test"
 
-        # Step 3: Update with Three Ps
+        # Step 3: Update with Three Ps (run from repo root so _resolve_archive_dir works)
         result = subprocess.run(
             [
                 sys.executable,
@@ -181,8 +181,12 @@ class TestFullLifecycle:
             text=True,
             check=False,
         )
-        # May fail if archive dir resolution doesn't match -- use --output path instead
-        # If update fails, that's OK -- we're testing what we can
+        assert result.returncode == 0, f"update failed: {result.stderr}"
+
+        # Verify Three Ps and needs_review update
+        sidecar = json.loads(sidecar_path.read_text())
+        assert sidecar["three_ps"]["prompt_summary"] == "Testing the lifecycle"
+        assert sidecar["archive"]["needs_review"] is False
 
         # Step 4: Delete CATALOG.json, run clean --execute to rebuild
         catalog_path = archive_dir / "CATALOG.json"
@@ -202,8 +206,8 @@ class TestFullLifecycle:
             text=True,
             check=False,
         )
-        # clean uses _resolve_archive_dir which needs project defaults -- may or may not work
-        # Just verify no crash (exit code 0 or graceful error)
+        assert result.returncode == 0, f"clean failed: {result.stderr}"
+        assert catalog_path.exists(), "CATALOG.json not rebuilt by clean"
 
         # Step 5: Verify all verbs respond to --help (AC2.1)
         for verb in [
