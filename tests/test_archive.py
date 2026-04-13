@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -531,3 +532,124 @@ class TestArchiveModuleDecomposition:
         cli = importlib.import_module("claude_transcript_archive.cli")
         # generate_title_from_content should NOT be on cli
         assert not hasattr(cli, "generate_title_from_content")
+
+
+# =============================================================================
+# Test mount recovery
+# =============================================================================
+
+
+class TestMountRecovery:
+    def test_branch_target_remounts_missing_worktree(self, temp_dir, monkeypatch):
+        """Missing .ai-transcripts/ + branch exists -> auto-remounts."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        # Don't create archive_dir -- it's missing
+        transcript = temp_dir / "test.jsonl"
+        transcript.write_text('{"type":"user","message":{"role":"user","content":"Hello"}}\n')
+
+        # Mock subprocess.run to simulate: branch exists, worktree add succeeds
+        call_log = []
+        original_run = subprocess.run
+
+        def mock_run(cmd, *args, **kwargs):
+            call_log.append(cmd)
+            if cmd[:3] == ["git", "branch", "--list"]:
+                return type("R", (), {"stdout": "  transcripts\n", "returncode": 0})()
+            if cmd[:3] == ["git", "worktree", "add"]:
+                # Actually create the directory so archive can proceed
+                archive_dir.mkdir(parents=True)
+                return type("R", (), {"stdout": "", "returncode": 0})()
+            return original_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr("claude_transcript_archive.archive.subprocess.run", mock_run)
+
+        archive(
+            "test-session",
+            transcript,
+            archive_dir,
+            target="branch",
+            quiet=True,
+        )
+        # Should have tried to remount
+        assert any("worktree" in str(c) for c in call_log)
+
+    def test_branch_target_no_branch_returns_none(self, temp_dir, monkeypatch):
+        """Missing .ai-transcripts/ + no branch -> returns None with error."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        transcript = temp_dir / "test.jsonl"
+        transcript.write_text('{"type":"user","message":{"role":"user","content":"Hello"}}\n')
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "branch", "--list"]:
+                return type("R", (), {"stdout": "", "returncode": 0})()
+            return subprocess.run(cmd, *args, check=False, **kwargs)
+
+        monkeypatch.setattr("claude_transcript_archive.archive.subprocess.run", mock_run)
+
+        result = archive(
+            "test-session",
+            transcript,
+            archive_dir,
+            target="branch",
+            quiet=True,
+        )
+        assert result is None
+
+    def test_existing_worktree_no_recovery_needed(self, temp_dir, sample_transcript_content):
+        """Existing .ai-transcripts/ -> normal archive, no recovery."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+        transcript = temp_dir / "test.jsonl"
+        transcript.write_text(sample_transcript_content)
+
+        # This should work normally without any git calls
+        result = archive(
+            "test-session",
+            transcript,
+            archive_dir,
+            target="branch",
+            quiet=True,
+        )
+        # Should proceed normally (archive creates output dir)
+        assert result is not None
+        assert result.exists()
+
+    def test_non_branch_target_no_recovery(self, temp_dir, sample_transcript_content):
+        """target='main' -> no mount recovery, writes to archive_dir directly."""
+        archive_dir = temp_dir / "ai_transcripts"
+        transcript = temp_dir / "test.jsonl"
+        transcript.write_text(sample_transcript_content)
+
+        # archive_dir doesn't exist but target is not "branch" so no recovery
+        # archive() will create it via mkdir(parents=True)
+        result = archive(
+            "test-session",
+            transcript,
+            archive_dir,
+            target="main",
+            quiet=True,
+        )
+        # Should proceed normally
+        assert result is not None
+
+    def test_git_error_during_recovery_returns_none(self, temp_dir, monkeypatch):
+        """Git subprocess failure during recovery -> returns None."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        transcript = temp_dir / "test.jsonl"
+        transcript.write_text('{"type":"user","message":{"role":"user","content":"Hello"}}\n')
+
+        def mock_run(cmd, *args, **kwargs):
+            if cmd[:3] == ["git", "branch", "--list"]:
+                raise subprocess.CalledProcessError(1, cmd)
+            return subprocess.run(cmd, *args, check=False, **kwargs)
+
+        monkeypatch.setattr("claude_transcript_archive.archive.subprocess.run", mock_run)
+
+        result = archive(
+            "test-session",
+            transcript,
+            archive_dir,
+            target="branch",
+            quiet=True,
+        )
+        assert result is None

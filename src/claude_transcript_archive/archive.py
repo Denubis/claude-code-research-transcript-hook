@@ -87,11 +87,46 @@ def archive(
     provided_title: str | None = None,
     quiet: bool = False,
     three_ps: dict[str, str] | None = None,
+    target: str | None = None,
 ) -> Path | None:
     """Archive a transcript with rich metadata.
 
     Returns the output directory path on success, None on failure or no-op.
+
+    When target="branch", performs mount recovery if archive_dir is missing:
+    checks for a 'transcripts' git branch and re-mounts the worktree.
     """
+    # Mount recovery: if target is "branch", ensure worktree is mounted
+    if target == "branch" and not archive_dir.exists():
+        try:
+            branch_check = subprocess.run(
+                ["git", "branch", "--list", "transcripts"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if branch_check.stdout.strip():
+                # Branch exists, re-mount worktree
+                subprocess.run(
+                    ["git", "worktree", "add", str(archive_dir), "transcripts"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                log_info(f"Re-mounted worktree at {archive_dir}", quiet)
+            else:
+                log_error(
+                    "No transcripts branch found. Run 'claude-transcript-archive init' first.",
+                    quiet,
+                )
+                return None
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            log_error(
+                "Git error during mount recovery. Run 'claude-transcript-archive init' first.",
+                quiet,
+            )
+            return None
+
     if not transcript_path.exists():
         log_error(f"Transcript not found: {transcript_path}", quiet)
         return None
