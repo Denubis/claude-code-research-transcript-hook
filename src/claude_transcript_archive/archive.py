@@ -230,6 +230,8 @@ def archive(
     three_ps: dict[str, str] | None = None,
     target: str | None = None,
     trivial: bool = False,
+    tags: list[str] | None = None,
+    purpose: str | None = None,
 ) -> Path | None:
     """Archive a transcript with rich metadata.
 
@@ -385,6 +387,8 @@ def archive(
         needs_review=needs_review,
         trivial=trivial,
         project_dir=project_dir,
+        tags=tags,
+        purpose=purpose,
     )
 
     # Write metadata sidecars

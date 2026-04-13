@@ -62,6 +62,11 @@ def archive(
     prompt: str | None = typer.Option(None, help="Three Ps: Prompt summary"),
     process: str | None = typer.Option(None, help="Three Ps: Process summary"),
     provenance: str | None = typer.Option(None, help="Three Ps: Provenance summary"),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
+    purpose: str | None = typer.Option(None, "--purpose", help="Session purpose"),
+    target_flag: str | None = typer.Option(
+        None, "--target", help="Storage target: branch, main, or here"
+    ),
 ):
     """Archive a Claude Code transcript with research-grade metadata."""
     # Determine input source: CLI arguments, stdin, or auto-discovery
@@ -106,7 +111,14 @@ def archive(
 
     # Load project defaults and determine target
     defaults = _discovery.load_project_defaults(project_dir)
-    target = defaults.get("target")
+
+    # Merge tags/purpose with project defaults
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    merged_tags = tag_list or defaults.get("tags", [])
+    merged_purpose = purpose or defaults.get("purpose", "")
+
+    # target_flag overrides defaults; --local/--output override both
+    target = target_flag or defaults.get("target")
 
     # CLI flags override defaults: --local or --output override branch target
     if local or output:
@@ -136,6 +148,8 @@ def archive(
         quiet=quiet,
         three_ps=three_ps,
         target=target,
+        tags=merged_tags,
+        purpose=merged_purpose,
     )
 
     if output_dir:
@@ -430,6 +444,8 @@ def bulk(
     local: bool = typer.Option(False, help="Archive to ./ai_transcripts/"),
     output: str | None = typer.Option(None, help="Custom output directory"),
     quiet: bool = typer.Option(False, help="Suppress output"),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
+    purpose: str | None = typer.Option(None, "--purpose", help="Session purpose"),
 ):
     """Archive all unarchived sessions in bulk."""
     try:
@@ -448,6 +464,11 @@ def bulk(
     project_dir = _discovery.get_project_dir_from_transcript(sessions[0][0])
     defaults = _discovery.load_project_defaults(project_dir)
     target = defaults.get("target")
+
+    # Merge tags/purpose with project defaults
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    merged_tags = tag_list or defaults.get("tags", [])
+    merged_purpose = purpose or defaults.get("purpose", "")
 
     # CLI flags override defaults
     if local or output:
@@ -500,6 +521,8 @@ def bulk(
             quiet=quiet,
             target=target,
             trivial=(classification == "trivial"),
+            tags=merged_tags,
+            purpose=merged_purpose,
         )
         if result:
             archived_count += 1

@@ -397,6 +397,8 @@ def create_session_metadata(
     needs_review: bool = True,
     trivial: bool = False,
     project_dir: Path | None = None,
+    tags: list[str] | None = None,
+    purpose: str | None = None,
 ) -> dict[str, Any]:
     """Create the complete session.meta.json structure."""
     file_hash = compute_file_hash(transcript_path)
@@ -436,8 +438,8 @@ def create_session_metadata(
         },
         "auto_generated": {
             "title": title,
-            "purpose": "",  # To be filled by interactive mode
-            "tags": [],
+            "purpose": purpose or "",
+            "tags": tags or [],
         },
         "three_ps": three_ps or {
             "prompt_summary": "",
