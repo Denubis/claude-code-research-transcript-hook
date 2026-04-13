@@ -17,7 +17,6 @@ from claude_transcript_archive.cli import (
     save_catalog,
     save_manifest,
     update_catalog,
-    update_html_titles,
     write_metadata_sidecar,
 )
 from claude_transcript_archive.metadata import (
@@ -257,34 +256,6 @@ class TestSanitizeFilename:
 
     def test_empty_result(self):
         assert sanitize_filename("???") == "untitled"
-
-
-# =============================================================================
-# Test update_html_titles
-# =============================================================================
-
-
-class TestUpdateHtmlTitles:
-    def test_title_replacement(self, temp_dir):
-        html_content = "<html><title>Claude Code transcript</title><body>Content</body></html>"
-        html_file = temp_dir / "test.html"
-        html_file.write_text(html_content)
-
-        update_html_titles(temp_dir, "My Custom Title")
-
-        updated = html_file.read_text()
-        assert "<title>My Custom Title</title>" in updated
-
-    def test_index_gets_h1(self, temp_dir):
-        html_content = "<html><title>Claude Code transcript</title><body>Content</body></html>"
-        html_file = temp_dir / "index.html"
-        html_file.write_text(html_content)
-
-        update_html_titles(temp_dir, "My Title")
-
-        updated = html_file.read_text()
-        assert "<h1" in updated
-        assert "My Title" in updated
 
 
 # =============================================================================
