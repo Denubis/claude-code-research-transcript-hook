@@ -224,7 +224,7 @@ class TestResolveWorktrees:
             "branch refs/heads/feature\n"
         )
         monkeypatch.setattr(
-            "subprocess.run",
+            "claude_transcript_archive.discovery.subprocess.run",
             lambda *_a, **_kw: type("R", (), {"stdout": mock_output, "returncode": 0})(),
         )
         result = resolve_worktrees()
@@ -239,14 +239,14 @@ class TestResolveWorktrees:
         def mock_run(*_a, **_kw):
             raise sp.CalledProcessError(128, "git")
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr("claude_transcript_archive.discovery.subprocess.run", mock_run)
         with pytest.raises(RuntimeError, match=r"[Nn]ot a git"):
             resolve_worktrees()
 
     def test_single_worktree(self, monkeypatch):
         mock_output = "worktree /home/user/project\nHEAD abc\nbranch refs/heads/main\n"
         monkeypatch.setattr(
-            "subprocess.run",
+            "claude_transcript_archive.discovery.subprocess.run",
             lambda *_a, **_kw: type("R", (), {"stdout": mock_output, "returncode": 0})(),
         )
         result = resolve_worktrees()
@@ -254,12 +254,22 @@ class TestResolveWorktrees:
 
     def test_empty_output_returns_cwd(self, monkeypatch):
         monkeypatch.setattr(
-            "subprocess.run",
+            "claude_transcript_archive.discovery.subprocess.run",
             lambda *_a, **_kw: type("R", (), {"stdout": "", "returncode": 0})(),
         )
         result = resolve_worktrees()
         assert len(result) == 1
         assert result[0] == Path.cwd()
+
+    def test_git_not_installed_raises_error(self, monkeypatch):
+        """Git not on PATH raises RuntimeError, not FileNotFoundError."""
+
+        def mock_run(*_a, **_kw):
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr("claude_transcript_archive.discovery.subprocess.run", mock_run)
+        with pytest.raises(RuntimeError, match=r"[Nn]ot a git"):
+            resolve_worktrees()
 
 
 # =============================================================================
@@ -396,3 +406,22 @@ class TestLoadProjectDefaults:
 
         result = load_project_defaults(temp_dir)
         assert result["future_key"] == "value"
+
+    def test_type_mismatched_keys_dropped(self, temp_dir, capsys):
+        """Expected keys with wrong types are dropped with a warning."""
+        defaults_dir = temp_dir / ".claude"
+        defaults_dir.mkdir(parents=True)
+        (defaults_dir / "transcript-defaults.json").write_text(json.dumps({
+            "tags": "not-a-list",
+            "purpose": 42,
+            "target": "local",
+        }))
+        (temp_dir / ".git").mkdir()
+
+        result = load_project_defaults(temp_dir)
+        assert "tags" not in result
+        assert "purpose" not in result
+        assert result["target"] == "local"
+        captured = capsys.readouterr()
+        assert "tags" in captured.err
+        assert "purpose" in captured.err

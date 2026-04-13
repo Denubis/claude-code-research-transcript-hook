@@ -21,7 +21,7 @@ def resolve_worktrees() -> list[Path]:
             text=True,
             check=True,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         msg = "Not a git repository. Run from a git-tracked project directory."
         raise RuntimeError(msg) from exc
 
@@ -223,6 +223,34 @@ def auto_discover_transcript() -> tuple[Path, str] | None:
     return transcript_path, session_id
 
 
+_EXPECTED_TYPES: dict[str, type] = {
+    "tags": list,
+    "purpose": str,
+    "three_ps_context": dict,
+    "target": str,
+}
+
+
+def _validate_defaults(data: dict, source: Path) -> dict:
+    """Validate expected keys have correct types, warn and drop mismatches."""
+    if not isinstance(data, dict):
+        actual = type(data).__name__
+        print(f"Warning: Expected JSON object in {source}, got {actual}", file=sys.stderr)
+        return {}
+    validated = {}
+    for key, value in data.items():
+        expected = _EXPECTED_TYPES.get(key)
+        if expected is not None and not isinstance(value, expected):
+            print(
+                f"Warning: Key '{key}' in {source} should be {expected.__name__}, "
+                f"got {type(value).__name__}; ignoring",
+                file=sys.stderr,
+            )
+            continue
+        validated[key] = value
+    return validated
+
+
 def load_project_defaults(project_dir: Path | None = None) -> dict:
     """Load project-level transcript defaults from .claude/transcript-defaults.json.
 
@@ -239,13 +267,14 @@ def load_project_defaults(project_dir: Path | None = None) -> dict:
         defaults_file = current / ".claude" / "transcript-defaults.json"
         if defaults_file.is_file():
             try:
-                return json.loads(defaults_file.read_text(encoding="utf-8"))
+                data = json.loads(defaults_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, ValueError):
                 print(
                     f"Warning: Malformed JSON in {defaults_file}",
                     file=sys.stderr,
                 )
                 return {}
+            return _validate_defaults(data, defaults_file)
 
         # Stop at git root
         if (current / ".git").exists():
