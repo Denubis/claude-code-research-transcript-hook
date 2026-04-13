@@ -8,6 +8,7 @@ for structured research documentation.
 import argparse
 import contextlib
 import hashlib
+import html as html_module
 import json
 import re
 import shutil
@@ -189,7 +190,7 @@ def _encode_cc_path(resolved: str) -> str:
     """Apply Claude Code's path-to-directory-name encoding to a resolved path string.
 
     Replaces the Windows drive-letter colon and both separator styles with '-'.
-    Example: 'C:\\\\Users\\\\a\\\\proj' -> 'C--Users-a-proj' (colon and first backslash both become '-').
+    Example: ``'C:\\\\Users\\\\a\\\\proj'`` -> ``'C--Users-a-proj'``.
     """
     return resolved.replace(":", "-").replace("\\", "-").replace("/", "-")
 
@@ -843,7 +844,13 @@ def log_info(message: str, quiet: bool = False):
         print(message)
 
 
-def format_tool_summary(tool_name: str, tool_input: dict) -> str:
+def _format_file_path(file_path: str, max_parts: int = 2) -> str:
+    """Format a file path for display, keeping only the last components."""
+    path = Path(file_path)
+    return "/".join(path.parts[-max_parts:]) if len(path.parts) > max_parts else path.name
+
+
+def format_tool_summary(tool_name: str, tool_input: dict) -> str:  # noqa: PLR0911
     """Format a tool call as a one-line summary.
 
     Examples:
@@ -853,56 +860,34 @@ def format_tool_summary(tool_name: str, tool_input: dict) -> str:
         Bash: git status
         Grep: pattern in *.py
     """
-    if tool_name == "Read":
-        file_path = tool_input.get("file_path", "unknown")
-        # Make path relative-looking by taking just filename or last 2 components
-        path = Path(file_path)
-        if len(path.parts) > 2:
-            display = "/".join(path.parts[-2:])
-        else:
-            display = path.name
-        return f"Read: {display}"
-
-    if tool_name == "Write":
-        file_path = tool_input.get("file_path", "unknown")
-        path = Path(file_path)
-        return f"Write: {path.name}"
-
-    if tool_name == "Edit":
-        file_path = tool_input.get("file_path", "unknown")
-        path = Path(file_path)
-        return f"Edit: {path.name}"
-
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        # Truncate long commands
-        if len(command) > 60:
-            command = command[:57] + "..."
-        return f"Bash: `{command}`"
-
-    if tool_name == "Grep":
-        pattern = tool_input.get("pattern", "")
-        path = tool_input.get("path", "")
-        return f"Grep: '{pattern}' in {path or '.'}"
-
-    if tool_name == "Glob":
-        pattern = tool_input.get("pattern", "")
-        return f"Glob: {pattern}"
-
-    if tool_name == "Task":
-        description = tool_input.get("description", "")
-        return f"Task: {description}"
-
-    if tool_name == "WebFetch":
-        url = tool_input.get("url", "")
-        return f"WebFetch: {url[:50]}..." if len(url) > 50 else f"WebFetch: {url}"
-
-    if tool_name == "WebSearch":
-        query = tool_input.get("query", "")
-        return f"WebSearch: '{query}'"
-
-    # Generic fallback
-    return f"{tool_name}"
+    match tool_name:
+        case "Read":
+            display = _format_file_path(tool_input.get("file_path", "unknown"))
+            return f"Read: {display}"
+        case "Write":
+            return f"Write: {Path(tool_input.get('file_path', 'unknown')).name}"
+        case "Edit":
+            return f"Edit: {Path(tool_input.get('file_path', 'unknown')).name}"
+        case "Bash":
+            command = tool_input.get("command", "")
+            if len(command) > 60:
+                command = command[:57] + "..."
+            return f"Bash: `{command}`"
+        case "Grep":
+            pattern = tool_input.get("pattern", "")
+            path = tool_input.get("path", "")
+            return f"Grep: '{pattern}' in {path or '.'}"
+        case "Glob":
+            return f"Glob: {tool_input.get('pattern', '')}"
+        case "Task":
+            return f"Task: {tool_input.get('description', '')}"
+        case "WebFetch":
+            url = tool_input.get("url", "")
+            return f"WebFetch: {url[:50]}..." if len(url) > 50 else f"WebFetch: {url}"
+        case "WebSearch":
+            return f"WebSearch: '{tool_input.get('query', '')}'"
+        case _:
+            return tool_name
 
 
 def extract_conversation_messages(content: str) -> list[dict]:
@@ -945,9 +930,8 @@ def extract_conversation_messages(content: str) -> list[dict]:
                 text_parts.append(msg_content)
             elif isinstance(msg_content, list):
                 for block in msg_content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
                         # Skip tool_result blocks - they're responses to assistant
 
             text = "\n".join(text_parts).strip()
@@ -1108,10 +1092,8 @@ def sanitize_for_pdf(text: str) -> str:
     for char in text:
         code = ord(char)
         # Keep tab (9), newline (10), carriage return (13), and normal printable
-        if code == 9 or code == 10 or code == 13 or code >= 32:
-            # Also skip DEL (127) and C1 control chars (128-159)
-            if code != 127 and not (128 <= code <= 159):
-                result.append(char)
+        if (code in {9, 10, 13} or code >= 32) and code != 127 and not (128 <= code <= 159):
+            result.append(char)
 
     return "".join(result)
 
@@ -1126,8 +1108,6 @@ def generate_conversation_html_for_pdf(
     Uses data-speaker attributes that the Lua filter converts to
     mdframed environments with colored borders.
     """
-    import html as html_module
-
     safe_title = sanitize_for_pdf(title)
     lines = [
         "<!DOCTYPE html>",
@@ -1145,9 +1125,9 @@ def generate_conversation_html_for_pdf(
         model_info = metadata.get("model", {})
         stats = metadata.get("statistics", {})
 
-        date_str = session.get("started_at", "")[:10] if session.get("started_at") else ""
-        model_id = model_info.get("model_id", "unknown")
-        version = model_info.get("claude_code_version", "")
+        date_str = (session.get("started_at") or "")[:10]
+        model_id = model_info.get("model_id") or "unknown"
+        version = model_info.get("claude_code_version") or ""
         duration = session.get("duration_minutes", 0)
         turns = stats.get("turns", 0)
 
@@ -1167,15 +1147,14 @@ def generate_conversation_html_for_pdf(
 
             if prompt_summary or process_summary or provenance_summary:
                 lines.append("<h2>Three Ps (IDW2025)</h2>")
-                if prompt_summary:
-                    safe_prompt = sanitize_for_pdf(prompt_summary)
-                    lines.append(f"<p><strong>Prompt</strong>: {html_module.escape(safe_prompt)}</p>")
-                if process_summary:
-                    safe_process = sanitize_for_pdf(process_summary)
-                    lines.append(f"<p><strong>Process</strong>: {html_module.escape(safe_process)}</p>")
-                if provenance_summary:
-                    safe_provenance = sanitize_for_pdf(provenance_summary)
-                    lines.append(f"<p><strong>Provenance</strong>: {html_module.escape(safe_provenance)}</p>")
+                for label, value in [
+                    ("Prompt", prompt_summary),
+                    ("Process", process_summary),
+                    ("Provenance", provenance_summary),
+                ]:
+                    if value:
+                        escaped = html_module.escape(sanitize_for_pdf(value))
+                        lines.append(f"<p><strong>{label}</strong>: {escaped}</p>")
 
         lines.append("<hr>")
 
@@ -1189,8 +1168,8 @@ def generate_conversation_html_for_pdf(
 
         # Message text as paragraphs
         if text:
-            for para in text.split("\n\n"):
-                para = para.strip()
+            for raw_para in text.split("\n\n"):
+                para = raw_para.strip()
                 if para:
                     # Preserve single newlines within paragraphs as <br>
                     para_lines = para.split("\n")

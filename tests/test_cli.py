@@ -140,7 +140,8 @@ class TestEncodeCCPath:
         assert _encode_cc_path("/home/user/my-cool-project") == "-home-user-my-cool-project"
 
     def test_windows_with_drive(self):
-        assert _encode_cc_path("C:\\Users\\Adela\\denubis-plugins") == "C--Users-Adela-denubis-plugins"
+        result = _encode_cc_path("C:\\Users\\Adela\\denubis-plugins")
+        assert result == "C--Users-Adela-denubis-plugins"
 
     def test_windows_forward_slashes(self):
         # Windows paths occasionally use '/' — handle both separators
