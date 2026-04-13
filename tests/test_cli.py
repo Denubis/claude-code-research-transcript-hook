@@ -10,6 +10,7 @@ import pytest
 
 from claude_transcript_archive.cli import (
     SCHEMA_VERSION,
+    _encode_cc_path,
     _is_ide_context_message,
     archive,
     auto_discover_transcript,
@@ -129,14 +130,42 @@ def sample_transcript_file(temp_dir, sample_transcript_content):
 # =============================================================================
 
 
-class TestGetCCProjectPath:
-    def test_simple_path(self):
-        result = get_cc_project_path(Path("/home/user/project"))
-        assert result == "-home-user-project"
+class TestEncodeCCPath:
+    """Tests for the pure string-encoding helper (platform-independent)."""
 
-    def test_path_with_dashes(self):
-        result = get_cc_project_path(Path("/home/user/my-cool-project"))
-        assert result == "-home-user-my-cool-project"
+    def test_posix_simple(self):
+        assert _encode_cc_path("/home/user/project") == "-home-user-project"
+
+    def test_posix_path_with_dashes(self):
+        assert _encode_cc_path("/home/user/my-cool-project") == "-home-user-my-cool-project"
+
+    def test_windows_with_drive(self):
+        assert _encode_cc_path("C:\\Users\\Adela\\denubis-plugins") == "C--Users-Adela-denubis-plugins"
+
+    def test_windows_forward_slashes(self):
+        # Windows paths occasionally use '/' — handle both separators
+        assert _encode_cc_path("C:/Users/Adela/proj") == "C--Users-Adela-proj"
+
+    def test_no_separators_leak(self):
+        """Encoded output must contain no ':', '/', or '\\\\'."""
+        encoded = _encode_cc_path("C:\\Users\\Adela\\my-proj")
+        assert ":" not in encoded
+        assert "/" not in encoded
+        assert "\\" not in encoded
+
+
+class TestGetCCProjectPath:
+    def test_matches_encoded_resolved_path(self, tmp_path):
+        # Use tmp_path so the test works on any OS
+        result = get_cc_project_path(tmp_path)
+        expected = _encode_cc_path(str(tmp_path.resolve()))
+        assert result == expected
+
+    def test_no_separators_in_output(self, tmp_path):
+        result = get_cc_project_path(tmp_path)
+        assert "/" not in result
+        assert "\\" not in result
+        assert ":" not in result
 
 
 # =============================================================================
@@ -158,10 +187,10 @@ class TestGetArchiveDir:
         result = get_archive_dir(local=False, output=None, project_dir=None)
         assert result == Path.home() / ".claude" / "transcripts"
 
-    def test_global_with_project(self):
-        project = Path("/home/user/myproject")
-        result = get_archive_dir(local=False, output=None, project_dir=project)
-        expected = Path.home() / ".claude" / "transcripts" / "-home-user-myproject"
+    def test_global_with_project(self, tmp_path):
+        # Use tmp_path so the resolved path is valid on the current OS
+        result = get_archive_dir(local=False, output=None, project_dir=tmp_path)
+        expected = Path.home() / ".claude" / "transcripts" / get_cc_project_path(tmp_path)
         assert result == expected
 
 
@@ -1350,25 +1379,22 @@ class TestAutoDiscoverTranscript:
     def test_no_jsonl_files(self, temp_dir, monkeypatch):
         """Test returns None when no jsonl files exist."""
         monkeypatch.setattr(Path, "home", lambda: temp_dir)
-        # Create the projects directory but no files
-        projects_dir = temp_dir / ".claude" / "projects" / f"-{str(temp_dir).replace('/', '-')}"
-        projects_dir.mkdir(parents=True)
         monkeypatch.chdir(temp_dir)
+        # Use the same encoder the production code uses, so the directory is
+        # valid on any OS (Windows paths contain ':' which cannot appear mid-path)
+        projects_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(temp_dir)
+        projects_dir.mkdir(parents=True)
         result = auto_discover_transcript()
         assert result is None
 
     def test_finds_transcript(self, temp_dir, monkeypatch):
         """Test finds most recent transcript."""
         monkeypatch.setattr(Path, "home", lambda: temp_dir)
-        # Create projects directory with a transcript
-        # Claude Code encodes paths by replacing / with -
-        # /tmp/foo -> -tmp-foo (the leading / becomes -)
-        encoded = str(temp_dir).replace("/", "-")
-        projects_dir = temp_dir / ".claude" / "projects" / encoded
+        monkeypatch.chdir(temp_dir)
+        projects_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(temp_dir)
         projects_dir.mkdir(parents=True)
         transcript = projects_dir / "abc123-def456.jsonl"
-        transcript.write_text('{"test": true}')
-        monkeypatch.chdir(temp_dir)
+        transcript.write_text('{"test": true}', encoding="utf-8")
         result = auto_discover_transcript()
         assert result is not None
         path, session_id = result

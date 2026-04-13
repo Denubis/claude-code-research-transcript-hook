@@ -185,13 +185,26 @@ end
 """
 
 
+def _encode_cc_path(resolved: str) -> str:
+    """Apply Claude Code's path-to-directory-name encoding to a resolved path string.
+
+    Replaces the Windows drive-letter colon and both separator styles with '-'.
+    Example: 'C:\\\\Users\\\\a\\\\proj' -> 'C--Users-a-proj' (colon and first backslash both become '-').
+    """
+    return resolved.replace(":", "-").replace("\\", "-").replace("/", "-")
+
+
 def get_cc_project_path(project_dir: Path) -> str:
     """Get CC's path-encoded project ID.
 
-    Claude Code encodes paths by replacing '/' with '-'.
-    E.g., /home/user/project -> -home-user-project
+    Claude Code encodes an absolute project path for use as a directory name
+    under ~/.claude/projects/.
+
+    Examples:
+        PosixPath('/home/user/project')         -> '-home-user-project'
+        WindowsPath('C:\\\\Users\\\\a\\\\proj') -> 'C--Users-a-proj'
     """
-    return str(project_dir.resolve()).replace("/", "-")
+    return _encode_cc_path(str(project_dir.resolve()))
 
 
 def get_archive_dir(local: bool, output: str | None, project_dir: Path | None = None) -> Path:
@@ -276,14 +289,14 @@ def load_manifest(archive_dir: Path) -> dict:
     """Load session -> directory mapping."""
     manifest_path = get_manifest_path(archive_dir)
     if manifest_path.exists():
-        return json.loads(manifest_path.read_text())
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
     return {}
 
 
 def save_manifest(archive_dir: Path, manifest: dict):
     """Save session -> directory mapping."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    get_manifest_path(archive_dir).write_text(json.dumps(manifest, indent=2))
+    get_manifest_path(archive_dir).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def get_catalog_path(archive_dir: Path) -> Path:
@@ -296,7 +309,7 @@ def load_catalog(archive_dir: Path) -> dict:
     catalog_path = get_catalog_path(archive_dir)
     if catalog_path.exists():
         try:
-            return json.loads(catalog_path.read_text())
+            return json.loads(catalog_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             pass
     return {
@@ -317,7 +330,7 @@ def save_catalog(archive_dir: Path, catalog: dict):
         1 for s in catalog["sessions"] if s.get("needs_review", True)
     )
     archive_dir.mkdir(parents=True, exist_ok=True)
-    get_catalog_path(archive_dir).write_text(json.dumps(catalog, indent=2))
+    get_catalog_path(archive_dir).write_text(json.dumps(catalog, indent=2), encoding="utf-8")
 
 
 def update_catalog(archive_dir: Path, session_metadata: dict):
@@ -698,7 +711,7 @@ def sanitize_filename(title: str) -> str:
 def update_html_titles(output_dir: Path, title: str):
     """Update HTML file titles to use the conversation title."""
     for html_file in output_dir.glob("*.html"):
-        content = html_file.read_text()
+        content = html_file.read_text(encoding="utf-8")
         # Replace generic title
         content = re.sub(
             r"<title>Claude Code transcript[^<]*</title>",
@@ -713,7 +726,7 @@ def update_html_titles(output_dir: Path, title: str):
                 content,
                 count=1,
             )
-        html_file.write_text(content)
+        html_file.write_text(content, encoding="utf-8")
 
 
 def compute_file_hash(file_path: Path) -> str:
@@ -810,12 +823,12 @@ def write_metadata_sidecar(
     """Write session.meta.json to archive AND next to original transcript."""
     # Write to archive directory
     archive_meta_path = archive_dir / "session.meta.json"
-    archive_meta_path.write_text(json.dumps(metadata, indent=2))
+    archive_meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     # Write sidecar next to original transcript
     sidecar_path = transcript_path.with_suffix(".jsonl.meta.json")
     with contextlib.suppress(PermissionError):
-        sidecar_path.write_text(json.dumps(metadata, indent=2))
+        sidecar_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
 def log_error(message: str, quiet: bool = False):
@@ -1222,15 +1235,15 @@ def generate_conversation_pdf(
 
         # Write HTML input
         html_path = tmpdir_path / "input.html"
-        html_path.write_text(html_content)
+        html_path.write_text(html_content, encoding="utf-8")
 
         # Write Lua filter
         filter_path = tmpdir_path / "speaker.lua"
-        filter_path.write_text(SPEAKER_LUA_FILTER)
+        filter_path.write_text(SPEAKER_LUA_FILTER, encoding="utf-8")
 
         # Write LaTeX header
         header_path = tmpdir_path / "header.tex"
-        header_path.write_text(PDF_PREAMBLE)
+        header_path.write_text(PDF_PREAMBLE, encoding="utf-8")
 
         # Run pandoc
         cmd = [
@@ -1275,10 +1288,7 @@ def auto_discover_transcript() -> tuple[Path, str] | None:
 
     Returns (transcript_path, session_id) or None if not found.
     """
-    cwd = Path.cwd()
-    # Claude Code encodes paths by replacing / with -
-    # /home/user/project -> -home-user-project (leading / becomes single -)
-    encoded_path = str(cwd).replace("/", "-")
+    encoded_path = get_cc_project_path(Path.cwd())
     projects_dir = Path.home() / ".claude" / "projects" / encoded_path
 
     if not projects_dir.exists():
@@ -1317,7 +1327,7 @@ def archive(
         log_error(f"Transcript not found: {transcript_path}", quiet)
         return None
 
-    content = transcript_path.read_text()
+    content = transcript_path.read_text(encoding="utf-8")
     if not content.strip():
         log_error(f"Transcript is empty: {transcript_path}", quiet)
         return None
@@ -1334,7 +1344,7 @@ def archive(
         marker_file = output_dir / ".last_size"
         current_size = transcript_path.stat().st_size
         if marker_file.exists():
-            last_size = int(marker_file.read_text())
+            last_size = int(marker_file.read_text(encoding="utf-8"))
             if current_size == last_size:
                 return  # No changes
     else:
@@ -1344,7 +1354,7 @@ def archive(
     if provided_title:
         title = provided_title
     elif output_dir and (output_dir / ".title").exists():
-        title = (output_dir / ".title").read_text().strip()
+        title = (output_dir / ".title").read_text(encoding="utf-8").strip()
     else:
         title = generate_title_from_content(content)
 
@@ -1440,7 +1450,7 @@ def archive(
                 metadata=metadata,
             )
             md_path = output_dir / "conversation.md"
-            md_path.write_text(md_content)
+            md_path.write_text(md_content, encoding="utf-8")
             log_info(f"Generated: {md_path}", quiet)
 
             # Generate PDF
@@ -1458,11 +1468,11 @@ def archive(
     update_catalog(archive_dir, metadata)
 
     # Store title and size marker
-    (output_dir / ".title").write_text(title)
-    (output_dir / ".last_size").write_text(str(transcript_path.stat().st_size))
+    (output_dir / ".title").write_text(title, encoding="utf-8")
+    (output_dir / ".last_size").write_text(str(transcript_path.stat().st_size), encoding="utf-8")
 
     # Keep raw backup
-    (output_dir / "raw-transcript.jsonl").write_text(content)
+    (output_dir / "raw-transcript.jsonl").write_text(content, encoding="utf-8")
 
     return output_dir
 
