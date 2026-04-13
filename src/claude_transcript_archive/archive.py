@@ -211,9 +211,11 @@ def migrate_legacy(legacy_dir: Path, target_dir: Path, *, dry_run: bool = True) 
     for item in sorted(legacy_dir.iterdir()):
         if item.is_dir() and (item / "session.meta.json").exists():
             dest = target_dir / item.name
-            if not dry_run and not dest.exists():
+            if dry_run:
+                migrated.append(item.name)
+            elif not dest.exists():
                 shutil.move(str(item), str(dest))
-            migrated.append(item.name)
+                migrated.append(item.name)
     return migrated
 
 

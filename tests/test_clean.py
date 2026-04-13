@@ -145,3 +145,44 @@ class TestCleanIndexRepair:
         # Files still don't exist
         assert not manifest_path.exists()
         assert not catalog_path.exists()
+
+    def test_execute_removes_duplicates(self, temp_dir, monkeypatch):
+        """Execute mode removes older duplicate archive directories."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+
+        # Create two dirs with same session_id (older and newer)
+        old_dir = archive_dir / "2024-01-01-session"
+        old_dir.mkdir()
+        (old_dir / "session.meta.json").write_text(json.dumps({
+            "session": {"id": "dup-session", "started_at": "2024-01-01T10:00:00"},
+            "auto_generated": {"title": "Old"},
+            "archive": {"directory_name": old_dir.name, "needs_review": True, "trivial": False},
+        }))
+
+        new_dir = archive_dir / "2024-01-02-session"
+        new_dir.mkdir()
+        (new_dir / "session.meta.json").write_text(json.dumps({
+            "session": {"id": "dup-session", "started_at": "2024-01-02T10:00:00"},
+            "auto_generated": {"title": "New"},
+            "archive": {"directory_name": new_dir.name, "needs_review": True, "trivial": False},
+        }))
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.cli._resolve_archive_dir",
+            lambda: archive_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.cli.subprocess.run",
+            lambda _cmd, **_kw: type(
+                "R", (), {"stdout": str(temp_dir), "returncode": 0}
+            )(),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["clean", "--execute"])
+        assert result.exit_code == 0
+
+        # Older dir removed, newer kept
+        assert not old_dir.exists()
+        assert new_dir.exists()
