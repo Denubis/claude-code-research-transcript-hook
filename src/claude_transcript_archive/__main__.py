@@ -1,4 +1,4 @@
-"""Allow running as python -m claude_transcript_archive.cli."""
+"""Allow running as python -m claude_transcript_archive."""
 
 from claude_transcript_archive.cli import app
 

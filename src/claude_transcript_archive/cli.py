@@ -74,6 +74,15 @@ def archive(
         raise typer.Exit(code=1)
 
     project_dir = _discovery.get_project_dir_from_transcript(transcript_path)
+
+    # Load project defaults and determine target
+    defaults = _discovery.load_project_defaults(project_dir)
+    target = defaults.get("target")
+
+    # CLI flags override defaults: --local or --output override branch target
+    if local or output:
+        target = None
+
     archive_dir = _discovery.get_archive_dir(
         local=local,
         output=output,
@@ -97,6 +106,7 @@ def archive(
         provided_title=title,
         quiet=quiet,
         three_ps=three_ps,
+        target=target,
     )
 
     if output_dir:
@@ -137,7 +147,7 @@ def init(
         check=True,
     )
     if not branch_check.stdout.strip():
-        # Save current branch
+        # Save current branch/commit for restore
         current = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo_root,
@@ -145,7 +155,17 @@ def init(
             text=True,
             check=True,
         )
-        saved_branch = current.stdout.strip()
+        saved_ref = current.stdout.strip()
+        if saved_ref == "HEAD":
+            # Detached HEAD — save the full SHA for checkout
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            saved_ref = sha.stdout.strip()
 
         try:
             subprocess.run(
@@ -163,13 +183,19 @@ def init(
                 check=True,
             )
         finally:
-            subprocess.run(
-                ["git", "switch", saved_branch],
+            # Restore previous branch/commit — don't mask the original error
+            restore = subprocess.run(
+                ["git", "checkout", saved_ref],
                 cwd=repo_root,
                 capture_output=True,
                 text=True,
-                check=True,
+                check=False,
             )
+            if restore.returncode != 0:
+                typer.echo(
+                    f"Warning: failed to restore branch '{saved_ref}': {restore.stderr.strip()}",
+                    err=True,
+                )
         typer.echo("Created orphan branch 'transcripts'")
     else:
         typer.echo("transcripts branch already exists")

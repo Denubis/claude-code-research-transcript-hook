@@ -98,9 +98,12 @@ def archive(
     """
     # Mount recovery: if target is "branch", ensure worktree is mounted
     if target == "branch" and not archive_dir.exists():
+        # Use archive_dir's parent as project root for git commands
+        project_root = archive_dir.parent
         try:
             branch_check = subprocess.run(
                 ["git", "branch", "--list", "transcripts"],
+                cwd=project_root,
                 capture_output=True,
                 text=True,
                 check=True,
@@ -109,6 +112,7 @@ def archive(
                 # Branch exists, re-mount worktree
                 subprocess.run(
                     ["git", "worktree", "add", str(archive_dir), "transcripts"],
+                    cwd=project_root,
                     capture_output=True,
                     text=True,
                     check=True,
