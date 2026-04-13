@@ -106,7 +106,7 @@ def archive(
 
 @app.command()
 def init(
-    _non_interactive: bool = typer.Option(
+    non_interactive: bool = typer.Option(
         False, "--non-interactive", help="Skip interactive prompts"
     ),
 ):
@@ -224,6 +224,44 @@ def init(
         typer.echo("Installed Stop hook in .claude/settings.local.json")
     else:
         typer.echo("Stop hook already installed")
+
+    # Step 6: Create project defaults
+    defaults_path = repo_root / ".claude" / "transcript-defaults.json"
+    if defaults_path.exists():
+        typer.echo("defaults already configured")
+    else:
+        if non_interactive:
+            defaults = {
+                "tags": [],
+                "purpose": "",
+                "three_ps_context": {
+                    "prompt_template": "",
+                    "process_template": "",
+                    "provenance_template": "",
+                },
+                "target": "branch",
+            }
+        else:
+            tags_input = typer.prompt("Tags (comma-separated)", default="")
+            tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+            purpose = typer.prompt("Purpose", default="")
+            prompt_tpl = typer.prompt("Three Ps - Prompt template", default="")
+            process_tpl = typer.prompt("Three Ps - Process template", default="")
+            provenance_tpl = typer.prompt("Three Ps - Provenance template", default="")
+            target = typer.prompt("Target (branch/main/here)", default="branch")
+            defaults = {
+                "tags": tags,
+                "purpose": purpose,
+                "three_ps_context": {
+                    "prompt_template": prompt_tpl,
+                    "process_template": process_tpl,
+                    "provenance_template": provenance_tpl,
+                },
+                "target": target,
+            }
+        defaults_path.parent.mkdir(parents=True, exist_ok=True)
+        defaults_path.write_text(json.dumps(defaults, indent=2), encoding="utf-8")
+        typer.echo("Created transcript defaults")
 
 
 if __name__ == "__main__":

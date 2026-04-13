@@ -151,3 +151,58 @@ class TestInitHookInstallation:
         # Should only have our hook once
         commands = [h["command"] for h in settings["hooks"]["Stop"]]
         assert commands.count("claude-transcript-archive archive --quiet") == 1
+
+
+class TestInitProjectDefaults:
+    def test_non_interactive_creates_skeleton(self, temp_dir):
+        """Non-interactive mode creates skeleton defaults."""
+        _git_init(temp_dir)
+
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        defaults_path = temp_dir / ".claude" / "transcript-defaults.json"
+        assert defaults_path.exists()
+        defaults = json.loads(defaults_path.read_text())
+        assert defaults["tags"] == []
+        assert defaults["purpose"] == ""
+        assert defaults["target"] == "branch"
+        assert "three_ps_context" in defaults
+        assert defaults["three_ps_context"]["prompt_template"] == ""
+        assert defaults["three_ps_context"]["process_template"] == ""
+        assert defaults["three_ps_context"]["provenance_template"] == ""
+
+    def test_existing_defaults_skipped(self, temp_dir):
+        """Existing defaults file is not overwritten."""
+        _git_init(temp_dir)
+        claude_dir = temp_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        existing = {"tags": ["important"], "purpose": "keep me"}
+        (claude_dir / "transcript-defaults.json").write_text(json.dumps(existing))
+
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        defaults = json.loads((claude_dir / "transcript-defaults.json").read_text())
+        assert defaults["tags"] == ["important"]  # Preserved
+        assert defaults["purpose"] == "keep me"  # Preserved
+
+    def test_idempotent_defaults(self, temp_dir):
+        """Running init twice doesn't overwrite defaults."""
+        _git_init(temp_dir)
+
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        # Modify defaults
+        defaults_path = temp_dir / ".claude" / "transcript-defaults.json"
+        modified = json.loads(defaults_path.read_text())
+        modified["purpose"] = "modified"
+        defaults_path.write_text(json.dumps(modified))
+
+        # Run again
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        result_data = json.loads(defaults_path.read_text())
+        assert result_data["purpose"] == "modified"  # Not overwritten
