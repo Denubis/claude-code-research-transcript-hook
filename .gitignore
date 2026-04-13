@@ -46,3 +46,6 @@ Thumbs.db
 
 # Transcript archives (generated locally)
 ai_transcripts/
+
+# Git worktrees
+.worktrees/
