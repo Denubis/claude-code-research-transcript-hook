@@ -3,12 +3,15 @@
 import importlib
 from pathlib import Path
 
+import pytest
+
 from claude_transcript_archive.discovery import (
     _encode_cc_path,
     auto_discover_transcript,
     get_archive_dir,
     get_cc_project_path,
     get_project_dir_from_transcript,
+    resolve_worktrees,
 )
 
 # =============================================================================
@@ -198,3 +201,59 @@ class TestModuleDecomposition:
         assert not hasattr(cli, "get_archive_dir")
         assert not hasattr(cli, "get_project_dir_from_transcript")
         assert not hasattr(cli, "auto_discover_transcript")
+
+
+# =============================================================================
+# Test resolve_worktrees
+# =============================================================================
+
+
+class TestResolveWorktrees:
+    def test_parses_multi_worktree_output(self, monkeypatch):
+        """AC4.1: Returns paths from all worktrees."""
+        mock_output = (
+            "worktree /home/user/project\n"
+            "HEAD abc123\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /home/user/project/.worktrees/feature\n"
+            "HEAD def456\n"
+            "branch refs/heads/feature\n"
+        )
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_a, **_kw: type("R", (), {"stdout": mock_output, "returncode": 0})(),
+        )
+        result = resolve_worktrees()
+        assert len(result) == 2
+        assert result[0] == Path("/home/user/project")
+        assert result[1] == Path("/home/user/project/.worktrees/feature")
+
+    def test_non_git_directory_raises_error(self, monkeypatch):
+        """AC4.3: Clear error for non-git directory."""
+        import subprocess as sp  # noqa: PLC0415
+
+        def mock_run(*_a, **_kw):
+            raise sp.CalledProcessError(128, "git")
+
+        monkeypatch.setattr("subprocess.run", mock_run)
+        with pytest.raises(RuntimeError, match=r"[Nn]ot a git"):
+            resolve_worktrees()
+
+    def test_single_worktree(self, monkeypatch):
+        mock_output = "worktree /home/user/project\nHEAD abc\nbranch refs/heads/main\n"
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_a, **_kw: type("R", (), {"stdout": mock_output, "returncode": 0})(),
+        )
+        result = resolve_worktrees()
+        assert len(result) == 1
+
+    def test_empty_output_returns_cwd(self, monkeypatch):
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *_a, **_kw: type("R", (), {"stdout": "", "returncode": 0})(),
+        )
+        result = resolve_worktrees()
+        assert len(result) == 1
+        assert result[0] == Path.cwd()

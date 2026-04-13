@@ -1,6 +1,38 @@
 """Path encoding, worktree resolution, session discovery, and project defaults."""
 
+import subprocess
 from pathlib import Path
+
+
+def resolve_worktrees() -> list[Path]:
+    """Discover all git worktrees for the current repository.
+
+    Runs ``git worktree list --porcelain`` and parses the output.
+    Returns list of absolute Path objects for each worktree.
+
+    Raises RuntimeError if not in a git repository.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        msg = "Not a git repository. Run from a git-tracked project directory."
+        raise RuntimeError(msg) from exc
+
+    output = result.stdout.strip()
+    if not output:
+        return [Path.cwd()]
+
+    paths: list[Path] = []
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            paths.append(Path(line.removeprefix("worktree ")))
+
+    return paths if paths else [Path.cwd()]
 
 
 def _encode_cc_path(resolved: str) -> str:
