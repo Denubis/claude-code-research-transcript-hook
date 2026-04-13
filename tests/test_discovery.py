@@ -119,9 +119,11 @@ class TestGetProjectDirFromTranscript:
         assert result is None  # graceful handling, no crash
 
     def test_claude_path_with_existing_dir(self, temp_dir, monkeypatch):
-        # Create a mock Claude projects structure
+        # Use a unique encoded path that won't match real filesystem directories.
+        # Encoded path "-xyzzy-testproject" decodes to /xyzzy/testproject
+        # which doesn't exist on real filesystems.
         projects_dir = temp_dir / ".claude" / "projects"
-        encoded_dir = projects_dir / "-tmp-testproject"
+        encoded_dir = projects_dir / "-xyzzy-testproject"
         encoded_dir.mkdir(parents=True)
         transcript = encoded_dir / "session.jsonl"
         transcript.touch()
@@ -129,13 +131,14 @@ class TestGetProjectDirFromTranscript:
         # Mock home directory
         monkeypatch.setattr(Path, "home", lambda: temp_dir)
 
-        # Create the target directory
-        target_dir = temp_dir / "tmp" / "testproject"
+        # Create the target directory under temp so only full match works
+        target_dir = temp_dir / "xyzzy" / "testproject"
         target_dir.mkdir(parents=True)
 
         result = get_project_dir_from_transcript(transcript)
-        # The function tries to decode and check if path exists
-        assert result is not None or result is None  # May or may not find it
+        # Function should not find /xyzzy (doesn't exist on host),
+        # so result is either None or something else — it must not crash.
+        assert result is None or isinstance(result, Path)
 
 
 # =============================================================================

@@ -43,7 +43,7 @@ def archive(
         sid = session_id
     elif transcript or session_id:
         _archive.log_error("Both --transcript and --session-id must be provided together", quiet)
-        raise SystemExit(1)
+        raise typer.Exit(code=1)
     else:
         if not sys.stdin.isatty():
             stdin_content = sys.stdin.read().strip()
@@ -66,11 +66,11 @@ def archive(
                     "--transcript and --session-id arguments.",
                     quiet,
                 )
-                raise SystemExit(1)
+                raise typer.Exit(code=1)
 
     if not transcript_path or not sid:
         _archive.log_error("Missing transcript_path or session_id in input", quiet)
-        raise SystemExit(1)
+        raise typer.Exit(code=1)
 
     project_dir = _discovery.get_project_dir_from_transcript(transcript_path)
     archive_dir = _discovery.get_archive_dir(

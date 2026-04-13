@@ -44,7 +44,7 @@ def generate_title_from_content(content: str) -> str:
 
             if isinstance(msg_content, str) and msg_content.strip():
                 # Skip IDE context messages
-                if _metadata._is_ide_context_message(msg_content):
+                if _metadata.is_ide_context_message(msg_content):
                     continue
 
                 # Clean and truncate

@@ -334,7 +334,7 @@ def find_plan_files(_transcript_path: Path) -> list[Path]:
     return list(plans_dir.glob("*.md"))
 
 
-def _is_ide_context_message(text: str) -> bool:
+def is_ide_context_message(text: str) -> bool:
     """Check if a message is just IDE context, not a real user request."""
     if not text:
         return True

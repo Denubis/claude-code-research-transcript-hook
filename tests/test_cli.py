@@ -23,15 +23,12 @@ class TestAC1ModuleDecomposition:
         assert catalog is not None
         assert archive is not None
 
-    def test_ac1_2_test_count_exceeds_v1(self):
-        """AC1.2: Total tests >= 93 (v1 count).
-
-        This is verified by the test suite itself: if we are running this test,
-        the suite has already collected well over 93 tests. The assertion below
-        is a structural marker; the real gate is pytest's collected count.
-        """
-        # Verified by running: uv run pytest --collect-only shows 131+ tests
-        pass
+    def test_ac1_2_test_count_exceeds_v1(self, request):
+        """AC1.2: Total tests >= 93 (v1 count)."""
+        session = request.session
+        assert session.testscollected >= 93, (
+            f"Expected >= 93 tests (v1 baseline), got {session.testscollected}"
+        )
 
     def test_ac1_3_moved_functions_not_in_cli(self):
         """AC1.3: Functions moved to submodules are not re-exported from cli."""

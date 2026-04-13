@@ -5,7 +5,6 @@ from pathlib import Path
 
 from claude_transcript_archive.metadata import (
     SCHEMA_VERSION,
-    _is_ide_context_message,
     create_session_metadata,
     detect_relationship_hints,
     estimate_cost,
@@ -13,6 +12,7 @@ from claude_transcript_archive.metadata import (
     extract_session_stats,
     find_plan_files,
     get_file_type,
+    is_ide_context_message,
 )
 
 # =============================================================================
@@ -254,35 +254,35 @@ class TestDetectRelationshipHints:
 
 
 # =============================================================================
-# Test _is_ide_context_message
+# Test is_ide_context_message
 # =============================================================================
 
 
 class TestIsIdeContextMessage:
     def test_ide_opened_file(self):
-        assert _is_ide_context_message("<ide_opened_file>stuff</ide_opened_file>")
+        assert is_ide_context_message("<ide_opened_file>stuff</ide_opened_file>")
 
     def test_ide_selection(self):
-        assert _is_ide_context_message("<ide_selection>code</ide_selection>")
+        assert is_ide_context_message("<ide_selection>code</ide_selection>")
 
     def test_system_reminder(self):
-        assert _is_ide_context_message("<system-reminder>reminder</system-reminder>")
+        assert is_ide_context_message("<system-reminder>reminder</system-reminder>")
 
     def test_command_name(self):
-        assert _is_ide_context_message("<command-name>/transcript</command-name>")
+        assert is_ide_context_message("<command-name>/transcript</command-name>")
 
     def test_short_message(self):
-        assert _is_ide_context_message("ok")
-        assert _is_ide_context_message("yes")
-        assert _is_ide_context_message("")
+        assert is_ide_context_message("ok")
+        assert is_ide_context_message("yes")
+        assert is_ide_context_message("")
 
     def test_real_message(self):
-        assert not _is_ide_context_message("Fix the authentication bug")
-        assert not _is_ide_context_message("Build a GUI for recording")
+        assert not is_ide_context_message("Fix the authentication bug")
+        assert not is_ide_context_message("Build a GUI for recording")
 
     def test_whitespace_handling(self):
-        assert _is_ide_context_message("  <ide_opened_file>stuff</ide_opened_file>  ")
-        assert _is_ide_context_message("   ok   ")
+        assert is_ide_context_message("  <ide_opened_file>stuff</ide_opened_file>  ")
+        assert is_ide_context_message("   ok   ")
 
 
 # =============================================================================
