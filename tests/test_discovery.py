@@ -8,6 +8,7 @@ import pytest
 from claude_transcript_archive.discovery import (
     _encode_cc_path,
     auto_discover_transcript,
+    discover_sessions,
     get_archive_dir,
     get_cc_project_path,
     get_project_dir_from_transcript,
@@ -257,3 +258,74 @@ class TestResolveWorktrees:
         result = resolve_worktrees()
         assert len(result) == 1
         assert result[0] == Path.cwd()
+
+
+# =============================================================================
+# Test discover_sessions
+# =============================================================================
+
+
+class TestDiscoverSessions:
+    def test_finds_sessions_across_worktrees(self, temp_dir, monkeypatch):
+        """AC4.1: Returns sessions from multiple worktree paths."""
+        home = temp_dir
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        wt1 = Path("/fake/project")
+        wt2 = Path("/fake/project/.worktrees/feature")
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [wt1, wt2],
+        )
+
+        encoded1 = _encode_cc_path(str(wt1.resolve()))
+        encoded2 = _encode_cc_path(str(wt2.resolve()))
+
+        proj_dir1 = home / ".claude" / "projects" / encoded1
+        proj_dir1.mkdir(parents=True)
+        (proj_dir1 / "session-aaa.jsonl").touch()
+
+        proj_dir2 = home / ".claude" / "projects" / encoded2
+        proj_dir2.mkdir(parents=True)
+        (proj_dir2 / "session-bbb.jsonl").touch()
+
+        result = discover_sessions()
+        session_ids = [sid for _, sid in result]
+        assert "session-aaa" in session_ids
+        assert "session-bbb" in session_ids
+
+    def test_deduplicates_by_session_id(self, temp_dir, monkeypatch):
+        """Same session under multiple worktrees returned only once."""
+        home = temp_dir
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        wt1 = Path("/fake/project")
+        wt2 = Path("/fake/project2")
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [wt1, wt2],
+        )
+
+        encoded1 = _encode_cc_path(str(wt1.resolve()))
+        encoded2 = _encode_cc_path(str(wt2.resolve()))
+
+        proj_dir1 = home / ".claude" / "projects" / encoded1
+        proj_dir1.mkdir(parents=True)
+        (proj_dir1 / "same-session.jsonl").touch()
+
+        proj_dir2 = home / ".claude" / "projects" / encoded2
+        proj_dir2.mkdir(parents=True)
+        (proj_dir2 / "same-session.jsonl").touch()
+
+        result = discover_sessions()
+        session_ids = [sid for _, sid in result]
+        assert session_ids.count("same-session") == 1
+
+    def test_no_sessions_returns_empty(self, temp_dir, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [Path("/nonexistent")],
+        )
+        result = discover_sessions()
+        assert result == []

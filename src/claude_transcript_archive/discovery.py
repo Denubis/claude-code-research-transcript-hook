@@ -57,6 +57,29 @@ def get_cc_project_path(project_dir: Path) -> str:
     return _encode_cc_path(str(project_dir.resolve()))
 
 
+def discover_sessions() -> list[tuple[Path, str]]:
+    """Discover all transcript sessions across git worktrees.
+
+    Calls resolve_worktrees() to find all worktree paths, maps each
+    through get_cc_project_path to find ~/.claude/projects/{encoded}/,
+    and scans for *.jsonl files.
+
+    Returns list of (transcript_path, session_id) tuples.
+    Deduplicates by session_id (same session may appear under multiple worktree paths).
+    """
+    seen: dict[str, Path] = {}
+    for wt_path in resolve_worktrees():
+        encoded = get_cc_project_path(wt_path)
+        projects_dir = Path.home() / ".claude" / "projects" / encoded
+        if not projects_dir.is_dir():
+            continue
+        for jsonl_file in projects_dir.glob("*.jsonl"):
+            session_id = jsonl_file.stem
+            if session_id not in seen:
+                seen[session_id] = jsonl_file
+    return [(path, sid) for sid, path in seen.items()]
+
+
 def get_archive_dir(local: bool, output: str | None, project_dir: Path | None = None) -> Path:
     """Determine the archive directory based on options.
 
