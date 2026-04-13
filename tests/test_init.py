@@ -1,5 +1,6 @@
 """Tests for the init command."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -99,3 +100,54 @@ class TestInitBranchAndWorktree:
         """AC4.3: Clear error for non-git directory."""
         result = _run_init(temp_dir)
         assert result.returncode != 0
+
+
+class TestInitHookInstallation:
+    def test_creates_settings_with_hook(self, temp_dir):
+        """No settings.local.json -> creates file with hook."""
+        _git_init(temp_dir)
+
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        settings_path = temp_dir / ".claude" / "settings.local.json"
+        assert settings_path.exists()
+        settings = json.loads(settings_path.read_text())
+        assert "hooks" in settings
+        assert "Stop" in settings["hooks"]
+        commands = [h["command"] for h in settings["hooks"]["Stop"]]
+        assert "claude-transcript-archive archive --quiet" in commands
+
+    def test_preserves_existing_hooks(self, temp_dir):
+        """Existing file with other hooks -> appends our hook."""
+        _git_init(temp_dir)
+        claude_dir = temp_dir / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        existing = {
+            "hooks": {
+                "Stop": [{"type": "command", "command": "other-tool --run"}]
+            }
+        }
+        (claude_dir / "settings.local.json").write_text(json.dumps(existing))
+
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        settings = json.loads((claude_dir / "settings.local.json").read_text())
+        commands = [h["command"] for h in settings["hooks"]["Stop"]]
+        assert "other-tool --run" in commands
+        assert "claude-transcript-archive archive --quiet" in commands
+
+    def test_hook_idempotent(self, temp_dir):
+        """Our hook already present -> no change."""
+        _git_init(temp_dir)
+
+        # Run init twice
+        for _ in range(2):
+            result = _run_init(temp_dir)
+            assert result.returncode == 0, f"init failed: {result.stderr}"
+
+        settings = json.loads((temp_dir / ".claude" / "settings.local.json").read_text())
+        # Should only have our hook once
+        commands = [h["command"] for h in settings["hooks"]["Stop"]]
+        assert commands.count("claude-transcript-archive archive --quiet") == 1

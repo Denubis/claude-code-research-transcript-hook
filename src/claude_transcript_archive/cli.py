@@ -200,6 +200,31 @@ def init(
     else:
         typer.echo(".ai-transcripts/ already in .gitignore")
 
+    # Step 5: Install Stop hook in settings.local.json
+    settings_path = repo_root / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    else:
+        settings = {}
+
+    our_hook = {
+        "type": "command",
+        "command": "claude-transcript-archive archive --quiet",
+    }
+
+    hooks = settings.setdefault("hooks", {})
+    stop_hooks = hooks.setdefault("Stop", [])
+
+    existing_commands = [h.get("command") for h in stop_hooks]
+    if our_hook["command"] not in existing_commands:
+        stop_hooks.append(our_hook)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        typer.echo("Installed Stop hook in .claude/settings.local.json")
+    else:
+        typer.echo("Stop hook already installed")
+
 
 if __name__ == "__main__":
     app()
