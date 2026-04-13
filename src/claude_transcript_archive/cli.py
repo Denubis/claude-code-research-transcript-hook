@@ -12,7 +12,9 @@ from pathlib import Path
 import typer
 
 from claude_transcript_archive import archive as _archive
+from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive import discovery as _discovery
+from claude_transcript_archive import metadata as _metadata
 
 app = typer.Typer(
     help="Archive Claude Code transcripts with research-grade metadata",
@@ -288,6 +290,112 @@ def init(
         defaults_path.parent.mkdir(parents=True, exist_ok=True)
         defaults_path.write_text(json.dumps(defaults, indent=2), encoding="utf-8")
         typer.echo("Created transcript defaults")
+
+
+@app.command()
+def status(
+    json_output: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
+):
+    """Report session state across worktrees."""
+    try:
+        worktrees = _discovery.resolve_worktrees()
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    sessions = _discovery.discover_sessions()
+
+    # Determine archive location
+    project_dir = (
+        _discovery.get_project_dir_from_transcript(sessions[0][0]) if sessions else None
+    )
+    defaults = _discovery.load_project_defaults(project_dir)
+    target = defaults.get("target", "branch")
+
+    if target == "branch":
+        # Use .ai-transcripts/ worktree
+        try:
+            repo_root = Path(
+                subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip()
+            )
+        except subprocess.CalledProcessError:
+            repo_root = Path.cwd()
+        archive_dir = repo_root / ".ai-transcripts"
+    else:
+        archive_dir = _discovery.get_archive_dir(
+            local=(target == "here"),
+            output=None,
+            project_dir=project_dir,
+        )
+
+    manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}
+    catalog = _catalog.load_catalog(archive_dir) if archive_dir.exists() else {"sessions": []}
+
+    # Cross-reference sessions with manifest
+    archived = []
+    unarchived = []
+
+    for transcript_path, session_id in sessions:
+        if session_id in manifest:
+            # Check needs_review from catalog
+            catalog_entry = next(
+                (
+                    s
+                    for s in catalog.get("sessions", [])
+                    if s.get("session_id") == session_id
+                ),
+                {},
+            )
+            archived.append({
+                "session_id": session_id,
+                "transcript_path": str(transcript_path),
+                "needs_review": catalog_entry.get("needs_review", True),
+            })
+        else:
+            # Classify unarchived session
+            content = (
+                transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
+            )
+            classification = _metadata.classify_session(content)
+            unarchived.append({
+                "session_id": session_id,
+                "transcript_path": str(transcript_path),
+                "classification": classification,
+            })
+
+    if json_output:
+        typer.echo(json.dumps({
+            "worktrees": len(worktrees),
+            "archived": archived,
+            "unarchived": unarchived,
+            "total": len(archived) + len(unarchived),
+        }, indent=2))
+    else:
+        reviewed = sum(1 for s in archived if not s["needs_review"])
+        needs_review = sum(1 for s in archived if s["needs_review"])
+        substantial = sum(1 for s in unarchived if s["classification"] == "substantial")
+        trivial = sum(1 for s in unarchived if s["classification"] == "trivial")
+
+        repo_name = Path.cwd().name
+        typer.echo(
+            f"Project: {repo_name}"
+            f" ({len(worktrees)} worktree{'s' if len(worktrees) != 1 else ''})"
+        )
+        typer.echo("")
+        typer.echo(
+            f"  Archived:    {len(archived)} sessions"
+            f" ({reviewed} reviewed, {needs_review} needs_review)"
+        )
+        typer.echo(
+            f"  Unarchived:  {len(unarchived)} sessions"
+            f" ({substantial} substantial, {trivial} trivial)"
+        )
+        typer.echo(f"  Total:       {len(archived) + len(unarchived)} sessions")
 
 
 if __name__ == "__main__":
