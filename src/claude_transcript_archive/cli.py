@@ -472,6 +472,7 @@ def bulk(
             archive_dir,
             quiet=quiet,
             target=target,
+            trivial=(classification == "trivial"),
         )
         if result:
             archived_count += 1

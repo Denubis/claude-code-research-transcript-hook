@@ -395,6 +395,7 @@ def create_session_metadata(
     directory_name: str,
     three_ps: dict[str, str] | None = None,
     needs_review: bool = True,
+    trivial: bool = False,
     project_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Create the complete session.meta.json structure."""
@@ -451,6 +452,7 @@ def create_session_metadata(
             "jsonl_sha256": file_hash,
             "jsonl_bytes": transcript_path.stat().st_size,
             "needs_review": needs_review,
+            "trivial": trivial,
         },
     }
 

@@ -88,6 +88,7 @@ def archive(
     quiet: bool = False,
     three_ps: dict[str, str] | None = None,
     target: str | None = None,
+    trivial: bool = False,
 ) -> Path | None:
     """Archive a transcript with rich metadata.
 
@@ -241,6 +242,7 @@ def archive(
         directory_name=directory_name,
         three_ps=three_ps,
         needs_review=needs_review,
+        trivial=trivial,
         project_dir=project_dir,
     )
 
