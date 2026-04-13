@@ -93,6 +93,61 @@ def update_catalog(archive_dir: Path, session_metadata: dict):
     save_catalog(archive_dir, catalog)
 
 
+def rebuild_indexes(archive_dir: Path) -> int:
+    """Rebuild manifest and catalog from session.meta.json sidecars.
+
+    Globs for */session.meta.json under archive_dir, reads each,
+    rebuilds .session_manifest.json and CATALOG.json.
+
+    Returns the number of sessions found.
+    """
+    manifest = {}
+    sessions = []
+
+    for sidecar_path in sorted(archive_dir.glob("*/session.meta.json")):
+        try:
+            metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            continue  # Skip malformed sidecars
+
+        session_id = metadata.get("session", {}).get("id")
+        if not session_id:
+            continue
+
+        archive_info = metadata.get("archive", {})
+        directory_name = archive_info.get("directory_name", sidecar_path.parent.name)
+
+        # Build manifest entry
+        manifest[session_id] = str(sidecar_path.parent)
+
+        # Build catalog session entry
+        sessions.append({
+            "session_id": session_id,
+            "title": metadata.get("auto_generated", {}).get("title", "Untitled"),
+            "started_at": metadata.get("session", {}).get("started_at"),
+            "directory": directory_name,
+            "needs_review": archive_info.get("needs_review", True),
+            "trivial": archive_info.get("trivial", False),
+        })
+
+    # Save manifest
+    save_manifest(archive_dir, manifest)
+
+    # Build and save catalog
+    needs_review_count = sum(1 for s in sessions if s.get("needs_review", True))
+    catalog = {
+        "schema_version": _metadata.SCHEMA_VERSION,
+        "generated_at": datetime.now().isoformat(),
+        "archive_location": str(archive_dir),
+        "total_sessions": len(sessions),
+        "needs_review_count": needs_review_count,
+        "sessions": sorted(sessions, key=lambda s: s.get("started_at") or "", reverse=True),
+    }
+    save_catalog(archive_dir, catalog)
+
+    return len(sessions)
+
+
 def write_metadata_sidecar(
     archive_dir: Path,
     transcript_path: Path,

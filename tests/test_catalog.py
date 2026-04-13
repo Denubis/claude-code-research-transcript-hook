@@ -8,6 +8,7 @@ from claude_transcript_archive.catalog import (
     get_manifest_path,
     load_catalog,
     load_manifest,
+    rebuild_indexes,
     save_catalog,
     save_manifest,
     update_catalog,
@@ -195,3 +196,85 @@ class TestCatalogModuleDecomposition:
     def test_ac1_3_no_reexport_write_metadata_from_cli(self):
         cli = importlib.import_module("claude_transcript_archive.cli")
         assert not hasattr(cli, "write_metadata_sidecar")
+
+
+# =============================================================================
+# Test rebuild_indexes
+# =============================================================================
+
+
+class TestRebuildIndexes:
+    def test_rebuilds_from_sidecars(self, temp_dir):
+        """3 archive dirs with sidecars -> correct catalog with 3 sessions."""
+        archive_dir = temp_dir / "archive"
+        archive_dir.mkdir()
+
+        for i in range(3):
+            session_dir = archive_dir / f"2024-01-0{i+1}-session-{i}"
+            session_dir.mkdir()
+            sidecar = {
+                "session": {"id": f"session-{i}", "started_at": f"2024-01-0{i+1}T10:00:00"},
+                "auto_generated": {"title": f"Session {i}"},
+                "archive": {
+                    "directory_name": session_dir.name,
+                    "needs_review": (i % 2 == 0),  # 0 and 2 need review
+                    "trivial": False,
+                },
+            }
+            (session_dir / "session.meta.json").write_text(json.dumps(sidecar))
+
+        count = rebuild_indexes(archive_dir)
+        assert count == 3
+
+        # Check manifest
+        manifest = load_manifest(archive_dir)
+        assert len(manifest) == 3
+        assert "session-0" in manifest
+
+        # Check catalog
+        catalog = load_catalog(archive_dir)
+        assert catalog["total_sessions"] == 3
+        assert catalog["needs_review_count"] == 2
+        assert len(catalog["sessions"]) == 3
+
+    def test_needs_review_count_correct(self, temp_dir):
+        archive_dir = temp_dir / "archive"
+        archive_dir.mkdir()
+
+        for i, needs_review in enumerate([True, False, True, False, False]):
+            session_dir = archive_dir / f"session-{i}"
+            session_dir.mkdir()
+            sidecar = {
+                "session": {"id": f"s-{i}", "started_at": f"2024-01-0{i+1}T10:00:00"},
+                "auto_generated": {"title": f"S{i}"},
+                "archive": {
+                    "directory_name": session_dir.name,
+                    "needs_review": needs_review,
+                    "trivial": False,
+                },
+            }
+            (session_dir / "session.meta.json").write_text(json.dumps(sidecar))
+
+        rebuild_indexes(archive_dir)
+        catalog = load_catalog(archive_dir)
+        assert catalog["needs_review_count"] == 2
+
+    def test_missing_sidecars_skipped(self, temp_dir):
+        archive_dir = temp_dir / "archive"
+        archive_dir.mkdir()
+
+        # One valid, one invalid
+        good_dir = archive_dir / "good-session"
+        good_dir.mkdir()
+        (good_dir / "session.meta.json").write_text(json.dumps({
+            "session": {"id": "good", "started_at": "2024-01-01T10:00:00"},
+            "auto_generated": {"title": "Good"},
+            "archive": {"directory_name": "good-session", "needs_review": False, "trivial": False},
+        }))
+
+        bad_dir = archive_dir / "bad-session"
+        bad_dir.mkdir()
+        (bad_dir / "session.meta.json").write_text("not valid json{{{")
+
+        count = rebuild_indexes(archive_dir)
+        assert count == 1
