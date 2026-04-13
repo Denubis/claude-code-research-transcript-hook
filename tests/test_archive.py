@@ -8,9 +8,11 @@ from pathlib import Path
 
 from claude_transcript_archive.archive import (
     archive,
+    find_duplicates,
     generate_title_from_content,
     log_error,
     log_info,
+    migrate_legacy,
     sanitize_filename,
 )
 from claude_transcript_archive.metadata import (
@@ -653,3 +655,77 @@ class TestMountRecovery:
             quiet=True,
         )
         assert result is None
+
+
+# =============================================================================
+# Test find_duplicates
+# =============================================================================
+
+
+class TestFindDuplicates:
+    def test_detects_duplicates(self, temp_dir):
+        archive_dir = temp_dir / "archive"
+        archive_dir.mkdir()
+        for i in range(2):
+            d = archive_dir / f"2024-01-0{i+1}-session"
+            d.mkdir()
+            (d / "session.meta.json").write_text(json.dumps({
+                "session": {"id": "same-session"},
+                "archive": {"directory_name": d.name},
+            }))
+        dupes = find_duplicates(archive_dir)
+        assert len(dupes) == 1
+        assert dupes[0][0] == "same-session"
+        assert len(dupes[0][1]) == 2
+
+    def test_no_duplicates(self, temp_dir):
+        archive_dir = temp_dir / "archive"
+        archive_dir.mkdir()
+        for sid in ["session-a", "session-b"]:
+            d = archive_dir / f"2024-01-01-{sid}"
+            d.mkdir()
+            (d / "session.meta.json").write_text(json.dumps({
+                "session": {"id": sid},
+                "archive": {"directory_name": d.name},
+            }))
+        assert find_duplicates(archive_dir) == []
+
+
+# =============================================================================
+# Test migrate_legacy
+# =============================================================================
+
+
+class TestMigrateLegacy:
+    def test_migrates_archive_dirs(self, temp_dir):
+        legacy = temp_dir / "ai_transcripts"
+        legacy.mkdir()
+        target = temp_dir / ".ai-transcripts"
+        target.mkdir()
+
+        # Create legacy archive with sidecar
+        d = legacy / "2024-01-01-old-session"
+        d.mkdir()
+        (d / "session.meta.json").write_text('{"session": {"id": "old"}}')
+
+        migrated = migrate_legacy(legacy, target, dry_run=False)
+        assert len(migrated) == 1
+        assert (target / "2024-01-01-old-session").exists()
+        assert not (legacy / "2024-01-01-old-session").exists()
+
+    def test_dry_run_no_changes(self, temp_dir):
+        legacy = temp_dir / "ai_transcripts"
+        legacy.mkdir()
+        target = temp_dir / ".ai-transcripts"
+        target.mkdir()
+
+        d = legacy / "2024-01-01-old-session"
+        d.mkdir()
+        (d / "session.meta.json").write_text('{"session": {"id": "old"}}')
+
+        migrated = migrate_legacy(legacy, target, dry_run=True)
+        assert len(migrated) == 1  # reports what would be migrated
+        assert (legacy / "2024-01-01-old-session").exists()  # still there
+
+    def test_nonexistent_legacy_dir(self, temp_dir):
+        assert migrate_legacy(temp_dir / "nope", temp_dir / "target", dry_run=True) == []

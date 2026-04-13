@@ -180,6 +180,43 @@ def regenerate_outputs(session_dir: Path, *, quiet: bool = False) -> bool:
     return True
 
 
+def find_duplicates(archive_dir: Path) -> list[tuple[str, list[Path]]]:
+    """Find sessions with multiple archive directories.
+
+    Scans */session.meta.json under archive_dir, groups by session_id.
+    Returns list of (session_id, [dir1, dir2, ...]) for sessions with >1 directory.
+    """
+    session_dirs: dict[str, list[Path]] = {}
+    for sidecar_path in sorted(archive_dir.glob("*/session.meta.json")):
+        try:
+            meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
+        sid = meta.get("session", {}).get("id")
+        if sid:
+            session_dirs.setdefault(sid, []).append(sidecar_path.parent)
+    return [(sid, dirs) for sid, dirs in session_dirs.items() if len(dirs) > 1]
+
+
+def migrate_legacy(legacy_dir: Path, target_dir: Path, *, dry_run: bool = True) -> list[str]:
+    """Migrate archive directories from old ai_transcripts/ to target.
+
+    Returns list of migrated session directory names.
+    In dry_run mode, returns what would be migrated without moving files.
+    """
+    if not legacy_dir.exists():
+        return []
+
+    migrated = []
+    for item in sorted(legacy_dir.iterdir()):
+        if item.is_dir() and (item / "session.meta.json").exists():
+            dest = target_dir / item.name
+            if not dry_run and not dest.exists():
+                shutil.move(str(item), str(dest))
+            migrated.append(item.name)
+    return migrated
+
+
 def archive(
     session_id: str,
     transcript_path: Path,

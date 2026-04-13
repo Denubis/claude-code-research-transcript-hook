@@ -5,6 +5,7 @@ Typer-based CLI that dispatches to the archive module.
 """
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -614,6 +615,71 @@ def regenerate(
 
     if not quiet:
         typer.echo(f"Regenerated {regenerated} session(s)")
+
+
+@app.command()
+def clean(
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--execute", help="Report without changes (default) or execute"
+    ),
+    quiet: bool = typer.Option(False, help="Suppress output"),
+):
+    """Clean archive: deduplicate, migrate legacy, repair indexes."""
+    archive_dir = _resolve_archive_dir()
+
+    if not archive_dir.exists():
+        if not quiet:
+            typer.echo("No archive found. Nothing to clean.")
+        return
+
+    findings = []
+
+    # Step 1: Find duplicates
+    duplicates = _archive.find_duplicates(archive_dir)
+    if duplicates:
+        for sid, dirs in duplicates:
+            dir_names = [d.name for d in dirs]
+            findings.append(f"Duplicate: {sid} in {', '.join(dir_names)}")
+            if not dry_run:
+                # Keep the newest (last by name, which is date-prefixed)
+                dirs_sorted = sorted(dirs, key=lambda d: d.name)
+                for old_dir in dirs_sorted[:-1]:
+                    shutil.rmtree(old_dir)
+
+    # Step 2: Check for legacy directory
+    try:
+        repo_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError:
+        repo_root = Path.cwd()
+
+    legacy_dir = repo_root / "ai_transcripts"
+    migrated = _archive.migrate_legacy(legacy_dir, archive_dir, dry_run=dry_run)
+    if migrated:
+        findings.append(f"Legacy migration: {len(migrated)} session(s) from ai_transcripts/")
+
+    # Step 3: Rebuild indexes
+    if not dry_run:
+        count = _catalog.rebuild_indexes(archive_dir)
+        findings.append(f"Rebuilt indexes: {count} session(s)")
+    else:
+        # Check if indexes need rebuild
+        manifest_path = archive_dir / ".session_manifest.json"
+        catalog_path = archive_dir / "CATALOG.json"
+        if not manifest_path.exists() or not catalog_path.exists():
+            findings.append("Would rebuild indexes (missing index files)")
+
+    if not quiet:
+        if findings:
+            prefix = "[DRY RUN] " if dry_run else ""
+            for finding in findings:
+                typer.echo(f"{prefix}{finding}")
+        else:
+            typer.echo("Archive is clean. No issues found.")
 
 
 if __name__ == "__main__":
