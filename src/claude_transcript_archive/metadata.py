@@ -219,14 +219,18 @@ def extract_artifacts(content: str, project_dir: Path | None = None) -> dict[str
     referenced = read_files - edited_files - written_files
 
     def make_relative(path: str) -> str:
-        """Convert to project-relative if possible."""
+        """Convert to project-relative if possible.
+
+        Always returns forward-slash paths (POSIX style) for consistent
+        storage regardless of platform.
+        """
         if project_dir:
             try:
                 resolved = Path(path).resolve()
-                return str(resolved.relative_to(project_dir.resolve()))
+                return resolved.relative_to(project_dir.resolve()).as_posix()
             except ValueError:
                 pass
-        return path
+        return path.replace("\\", "/")
 
     result: dict[str, list] = {"created": [], "modified": [], "referenced": []}
 

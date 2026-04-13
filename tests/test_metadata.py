@@ -177,6 +177,47 @@ class TestExtractArtifacts:
         artifacts = extract_artifacts(content, project_dir)
         assert artifacts["created"][0]["path"] == "src/main.py"
 
+    def test_artifact_paths_always_use_forward_slashes(self, temp_dir):
+        """Artifact paths must use forward slashes regardless of platform.
+
+        On Windows, Path.relative_to + str() produces backslashes.
+        The as_posix() normalisation ensures consistent storage.
+        """
+        project_dir = temp_dir / "myproject"
+        project_dir.mkdir()
+        content = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {"file_path": str(project_dir / "src" / "deep" / "file.py")},
+                        },
+                        {
+                            "type": "tool_use",
+                            "name": "Edit",
+                            "input": {"file_path": str(project_dir / "tests" / "test_it.py")},
+                        },
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": str(project_dir / "docs" / "readme.md")},
+                        },
+                    ],
+                },
+            }
+        )
+        artifacts = extract_artifacts(content, project_dir)
+        # All paths must use forward slashes, never backslashes
+        for category in ("created", "modified", "referenced"):
+            for artifact in artifacts[category]:
+                assert "\\" not in artifact["path"], (
+                    f"Backslash in {category} path: {artifact['path']}"
+                )
+
 
 # =============================================================================
 # Test detect_relationship_hints

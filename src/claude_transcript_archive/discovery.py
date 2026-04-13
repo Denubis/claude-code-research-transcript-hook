@@ -59,9 +59,19 @@ def get_project_dir_from_transcript(transcript_path: Path) -> Path | None:
         # First component is the encoded project path
         encoded_path = rel_path.parts[0]
 
-        # The encoding replaces / with - so we need to find which dashes
-        # are path separators. We do this by trying to find a valid path.
-        if encoded_path.startswith("-"):
+        # The encoding replaces / with - (and on Windows, : with - and \ with -).
+        # Detect POSIX vs Windows encoded paths:
+        #   POSIX:   "-home-user-project"  (leading dash from root /)
+        #   Windows: "C--Users-Adela-proj" (double dash from drive colon C:)
+        is_posix_encoded = encoded_path.startswith("-")
+        # Windows drive pattern: single letter followed by double dash
+        is_windows_encoded = (
+            len(encoded_path) >= 3
+            and encoded_path[0].isalpha()
+            and encoded_path[1:3] == "--"
+        )
+
+        if is_posix_encoded:
             # Simple approach: replace all - with / and check if it exists
             decoded = encoded_path.replace("-", "/")
             candidate = Path(decoded)
@@ -91,6 +101,38 @@ def get_project_dir_from_transcript(transcript_path: Path) -> Path | None:
                         break
 
             if current != Path("/") and current.exists():
+                return current
+
+        elif is_windows_encoded:
+            # Reconstruct drive letter: "C--Users-..." -> "C:\Users\..."
+            drive_letter = encoded_path[0]
+            rest = encoded_path[3:]  # Skip "C--"
+            decoded = f"{drive_letter}:\\{rest.replace('-', chr(92))}"
+            candidate = Path(decoded)
+            if candidate.exists():
+                return candidate
+
+            # Progressive decode for Windows paths
+            parts = rest.split("-")
+            current = Path(f"{drive_letter}:\\")
+            for i, part in enumerate(parts):
+                if not part:
+                    continue
+                test_path = current / part
+                if test_path.exists():
+                    current = test_path
+                else:
+                    combined = part
+                    for j in range(i + 1, len(parts)):
+                        combined = f"{combined}-{parts[j]}"
+                        test_path = current / combined
+                        if test_path.exists():
+                            current = test_path
+                            break
+                    else:
+                        break
+
+            if current != Path(f"{drive_letter}:\\") and current.exists():
                 return current
 
     except ValueError:
