@@ -1,5 +1,6 @@
 """Archive orchestration: hash-based skip detection, directory naming, session archiving."""
 
+import contextlib
 import json
 import re
 import shutil
@@ -76,6 +77,107 @@ def log_info(message: str, quiet: bool = False):
     """Print info message to stdout unless quiet mode."""
     if not quiet:
         print(message)
+
+
+def update_metadata(
+    session_dir: Path,
+    *,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    purpose: str | None = None,
+    prompt: str | None = None,
+    process: str | None = None,
+    provenance: str | None = None,
+) -> bool:
+    """Update metadata fields on an existing archived session.
+
+    Modifies session.meta.json in place. Returns True if updated, False if skipped.
+    Sets needs_review=False when all Three Ps are populated.
+    """
+    sidecar_path = session_dir / "session.meta.json"
+    if not sidecar_path.exists():
+        return False
+
+    try:
+        meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    if title:
+        meta.setdefault("auto_generated", {})["title"] = title
+    if tags is not None:
+        meta.setdefault("auto_generated", {})["tags"] = tags
+    if purpose:
+        meta.setdefault("auto_generated", {})["purpose"] = purpose
+    if prompt:
+        meta.setdefault("three_ps", {})["prompt_summary"] = prompt
+    if process:
+        meta.setdefault("three_ps", {})["process_summary"] = process
+    if provenance:
+        meta.setdefault("three_ps", {})["provenance_summary"] = provenance
+
+    # If all Three Ps provided, mark as reviewed
+    three_ps = meta.get("three_ps", {})
+    if (
+        three_ps.get("prompt_summary")
+        and three_ps.get("process_summary")
+        and three_ps.get("provenance_summary")
+    ):
+        meta.setdefault("archive", {})["needs_review"] = False
+
+    sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return True
+
+
+def regenerate_outputs(session_dir: Path, *, quiet: bool = False) -> bool:
+    """Re-render output files from raw-transcript.jsonl in an archive directory.
+
+    Returns True if regenerated, False if skipped (missing raw transcript).
+    """
+
+    raw_path = session_dir / "raw-transcript.jsonl"
+    if not raw_path.exists():
+        log_info(f"Warning: no raw-transcript.jsonl in {session_dir.name}, skipping", quiet=False)
+        return False
+
+    content = raw_path.read_text(encoding="utf-8")
+
+    # Read title from sidecar or .title file
+    title = "Untitled"
+    metadata = None
+    sidecar_path = session_dir / "session.meta.json"
+    if sidecar_path.exists():
+        try:
+            meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            title = meta.get("auto_generated", {}).get("title", title)
+            metadata = meta
+        except json.JSONDecodeError:
+            pass
+    title_file = session_dir / ".title"
+    if title_file.exists():
+        title = title_file.read_text(encoding="utf-8").strip() or title
+
+    # Re-render HTML via claude-code-transcripts
+    with contextlib.suppress(FileNotFoundError):
+        subprocess.run(
+            ["claude-code-transcripts", "json", str(raw_path), "-o", str(session_dir), "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    _output.update_html_titles(session_dir, title)
+
+    # Re-render markdown and PDF
+    messages = _output.extract_conversation_messages(content)
+    if messages:
+        md_content = _output.generate_conversation_markdown(messages, title, metadata=metadata)
+        (session_dir / "conversation.md").write_text(md_content, encoding="utf-8")
+
+        pdf_path = session_dir / "conversation.pdf"
+        _output.generate_conversation_pdf(messages, title, pdf_path, quiet=quiet, metadata=metadata)
+
+    return True
 
 
 def archive(

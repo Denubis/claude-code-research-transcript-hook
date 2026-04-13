@@ -107,8 +107,8 @@ def rebuild_indexes(archive_dir: Path) -> int:
     for sidecar_path in sorted(archive_dir.glob("*/session.meta.json")):
         try:
             metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, ValueError):
-            continue  # Skip malformed sidecars
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue  # Skip malformed or unreadable sidecars
 
         session_id = metadata.get("session", {}).get("id")
         if not session_id:

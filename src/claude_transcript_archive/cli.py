@@ -4,7 +4,6 @@
 Typer-based CLI that dispatches to the archive module.
 """
 
-import contextlib
 import json
 import subprocess
 import sys
@@ -16,12 +15,37 @@ from claude_transcript_archive import archive as _archive
 from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive import discovery as _discovery
 from claude_transcript_archive import metadata as _metadata
-from claude_transcript_archive import output as _output
 
 app = typer.Typer(
     help="Archive Claude Code transcripts with research-grade metadata",
     add_completion=False,
 )
+
+
+def _resolve_archive_dir() -> Path:
+    """Resolve the archive directory from git root and project defaults."""
+    try:
+        repo_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError:
+        repo_root = Path.cwd()
+
+    defaults = _discovery.load_project_defaults(repo_root)
+    target = defaults.get("target", "branch")
+
+    if target == "branch":
+        return repo_root / ".ai-transcripts"
+    return _discovery.get_archive_dir(
+        local=(target == "here"),
+        output=None,
+        project_dir=repo_root,
+    )
 
 
 @app.command()
@@ -507,32 +531,7 @@ def update(
         typer.echo("Error: provide --session-id or --all-needs-review", err=True)
         raise typer.Exit(code=1)
 
-    # Resolve archive directory
-    try:
-        repo_root = Path(
-            subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-        )
-    except subprocess.CalledProcessError:
-        repo_root = Path.cwd()
-
-    project_dir = repo_root  # assume current repo
-    defaults = _discovery.load_project_defaults(project_dir)
-    target = defaults.get("target", "branch")
-
-    if target == "branch":
-        archive_dir = repo_root / ".ai-transcripts"
-    else:
-        archive_dir = _discovery.get_archive_dir(
-            local=(target == "here"),
-            output=None,
-            project_dir=project_dir,
-        )
-
+    archive_dir = _resolve_archive_dir()
     if not archive_dir.exists():
         typer.echo("Error: no archive found. Run 'init' first.", err=True)
         raise typer.Exit(code=1)
@@ -540,7 +539,7 @@ def update(
     manifest = _catalog.load_manifest(archive_dir)
 
     # Collect target sessions
-    target_sessions = []
+    target_sessions: list[tuple[str, Path]] = []
     if session_id:
         if session_id not in manifest:
             typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
@@ -562,42 +561,20 @@ def update(
             typer.echo("No sessions to update.")
         return
 
-    updated_count = 0
-    for _sid, session_dir in target_sessions:
-        sidecar_path = session_dir / "session.meta.json"
-        if not sidecar_path.exists():
-            continue
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    updated_count = sum(
+        _archive.update_metadata(
+            session_dir,
+            title=title,
+            tags=tag_list,
+            purpose=purpose,
+            prompt=prompt,
+            process=process,
+            provenance=provenance,
+        )
+        for _, session_dir in target_sessions
+    )
 
-        meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
-
-        # Apply updates
-        if title:
-            meta.setdefault("auto_generated", {})["title"] = title
-        if tags:
-            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-            meta.setdefault("auto_generated", {})["tags"] = tag_list
-        if purpose:
-            meta.setdefault("auto_generated", {})["purpose"] = purpose
-        if prompt:
-            meta.setdefault("three_ps", {})["prompt_summary"] = prompt
-        if process:
-            meta.setdefault("three_ps", {})["process_summary"] = process
-        if provenance:
-            meta.setdefault("three_ps", {})["provenance_summary"] = provenance
-
-        # If all Three Ps provided, mark as reviewed
-        three_ps = meta.get("three_ps", {})
-        if (
-            three_ps.get("prompt_summary")
-            and three_ps.get("process_summary")
-            and three_ps.get("provenance_summary")
-        ):
-            meta.setdefault("archive", {})["needs_review"] = False
-
-        sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        updated_count += 1
-
-    # Rebuild indexes after modifications
     _catalog.rebuild_indexes(archive_dir)
 
     if not quiet:
@@ -615,40 +592,14 @@ def regenerate(
         typer.echo("Error: provide --session-id or --all", err=True)
         raise typer.Exit(code=1)
 
-    # Resolve archive directory (same pattern as update command)
-    try:
-        repo_root = Path(
-            subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-        )
-    except subprocess.CalledProcessError:
-        repo_root = Path.cwd()
-
-    project_dir = repo_root
-    defaults = _discovery.load_project_defaults(project_dir)
-    target = defaults.get("target", "branch")
-
-    if target == "branch":
-        archive_dir = repo_root / ".ai-transcripts"
-    else:
-        archive_dir = _discovery.get_archive_dir(
-            local=(target == "here"),
-            output=None,
-            project_dir=project_dir,
-        )
-
+    archive_dir = _resolve_archive_dir()
     if not archive_dir.exists():
         typer.echo("Error: no archive found. Run 'init' first.", err=True)
         raise typer.Exit(code=1)
 
     manifest = _catalog.load_manifest(archive_dir)
 
-    # Collect target sessions
-    target_dirs = []
+    target_dirs: list[Path] = []
     if session_id:
         if session_id not in manifest:
             typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
@@ -657,65 +608,9 @@ def regenerate(
     elif all_sessions:
         target_dirs = [Path(d) for d in manifest.values()]
 
-    regenerated = 0
-    for session_dir in target_dirs:
-        raw_path = session_dir / "raw-transcript.jsonl"
-        if not raw_path.exists():
-            if not quiet:
-                typer.echo(f"Warning: no raw-transcript.jsonl in {session_dir.name}, skipping")
-            continue
-
-        content = raw_path.read_text(encoding="utf-8")
-
-        # Read title from sidecar or .title file
-        title = "Untitled"
-        metadata = None
-        sidecar_path = session_dir / "session.meta.json"
-        if sidecar_path.exists():
-            try:
-                meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
-                title = meta.get("auto_generated", {}).get("title", title)
-                metadata = meta
-            except json.JSONDecodeError:
-                pass
-        title_file = session_dir / ".title"
-        if title_file.exists():
-            title = title_file.read_text(encoding="utf-8").strip() or title
-
-        # Re-render HTML via claude-code-transcripts
-        with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
-                [
-                    "claude-code-transcripts",
-                    "json",
-                    str(raw_path),
-                    "-o",
-                    str(session_dir),
-                    "--json",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-        # Update HTML titles
-        _output.update_html_titles(session_dir, title)
-
-        # Re-render markdown
-        messages = _output.extract_conversation_messages(content)
-        if messages:
-            md_content = _output.generate_conversation_markdown(
-                messages, title, metadata=metadata
-            )
-            (session_dir / "conversation.md").write_text(md_content, encoding="utf-8")
-
-            # Re-render PDF
-            pdf_path = session_dir / "conversation.pdf"
-            _output.generate_conversation_pdf(
-                messages, title, pdf_path, quiet=quiet, metadata=metadata
-            )
-
-        regenerated += 1
+    regenerated = sum(
+        _archive.regenerate_outputs(d, quiet=quiet) for d in target_dirs
+    )
 
     if not quiet:
         typer.echo(f"Regenerated {regenerated} session(s)")
