@@ -206,3 +206,61 @@ class TestInitProjectDefaults:
 
         result_data = json.loads(defaults_path.read_text())
         assert result_data["purpose"] == "modified"  # Not overwritten
+
+
+class TestInitIntegration:
+    def test_full_init_and_idempotency(self, temp_dir):
+        """AC3.1 + AC3.2 + AC3.4: Full init produces all artifacts, second run is idempotent."""
+        # Setup git repo
+        _git_init(temp_dir)
+
+        # First run
+        result = _run_init(temp_dir)
+        assert result.returncode == 0, f"First init failed: {result.stderr}"
+
+        # Verify all artifacts
+        # AC3.1: transcripts branch exists
+        branches = subprocess.run(
+            ["git", "branch", "--list", "transcripts"],
+            cwd=temp_dir, capture_output=True, text=True, check=True,
+        )
+        assert "transcripts" in branches.stdout
+
+        # AC3.2: worktree mounted
+        assert (temp_dir / ".ai-transcripts").is_dir()
+        wt_list = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=temp_dir, capture_output=True, text=True, check=True,
+        )
+        assert ".ai-transcripts" in wt_list.stdout
+
+        # AC3.2: .gitignore updated
+        gitignore = (temp_dir / ".gitignore").read_text()
+        assert ".ai-transcripts/" in gitignore
+
+        # Hook installed
+        settings = json.loads((temp_dir / ".claude" / "settings.local.json").read_text())
+        assert any(
+            h.get("command") == "claude-transcript-archive archive --quiet"
+            for h in settings.get("hooks", {}).get("Stop", [])
+        )
+
+        # Defaults created
+        defaults = json.loads((temp_dir / ".claude" / "transcript-defaults.json").read_text())
+        assert "target" in defaults
+
+        # Second run — idempotent
+        result2 = _run_init(temp_dir)
+        assert result2.returncode == 0, f"Second init failed: {result2.stderr}"
+
+        # Verify no duplicates
+        gitignore2 = (temp_dir / ".gitignore").read_text()
+        assert gitignore2.count(".ai-transcripts/") == 1
+
+        settings2 = json.loads((temp_dir / ".claude" / "settings.local.json").read_text())
+        stop_hooks = settings2.get("hooks", {}).get("Stop", [])
+        our_hooks = [
+            h for h in stop_hooks
+            if h.get("command") == "claude-transcript-archive archive --quiet"
+        ]
+        assert len(our_hooks) == 1
