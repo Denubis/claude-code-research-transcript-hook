@@ -15,27 +15,27 @@ Archive [Claude Code](https://docs.anthropic.com/en/docs/claude-code) conversati
 
 ## Installation
 
-### Global install (recommended for hooks)
+### As a Claude Code plugin (recommended)
 
 ```bash
+/plugin install https://github.com/Denubis/claude-code-research-transcript-hook
+```
+
+This installs the `/transcript` command and the transcript archive skill automatically.
+
+### CLI tool only
+
+```bash
+# Global install (for hooks)
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
-```
 
-### Per-repo with uvx
-
-```bash
+# Per-repo with uvx
 uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript --local
-```
 
-### Using pipx
-
-```bash
+# Using pipx
 pipx install git+https://github.com/Denubis/claude-code-research-transcript-hook
-```
 
-### From source
-
-```bash
+# From source
 git clone https://github.com/Denubis/claude-code-research-transcript-hook
 cd claude-code-research-transcript-hook
 uv tool install .
@@ -43,17 +43,7 @@ uv tool install .
 
 ## Setup
 
-### 1. Install the `/transcript` slash command (recommended)
-
-Copy the slash command to your Claude commands directory:
-
-```bash
-cp claude-commands/transcript.md ~/.claude/commands/
-```
-
-Now you can run `/transcript` in any Claude Code session to interactively archive the conversation with research metadata.
-
-### 2. Enable auto-archive for a project (optional)
+### Enable auto-archive for a project (optional)
 
 To automatically archive transcripts when Claude stops, copy the example hook to your project:
 
@@ -143,7 +133,7 @@ Sessions archived via hooks are marked `needs_review: true`. Run `/transcript` t
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.12+
 - [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) (installed automatically)
 
 ## License

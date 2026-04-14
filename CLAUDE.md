@@ -5,8 +5,10 @@ Archive Claude Code conversations with research-grade metadata using the IDW2025
 ## Project Structure
 
 ```text
+.claude-plugin/plugin.json            # Plugin manifest
+commands/transcript.md                # /transcript slash command
+skills/transcript/SKILL.md            # Transcript archive skill
 src/claude_transcript_archive/cli.py  # Main CLI implementation
-claude-commands/transcript.md         # Interactive /transcript command
 example-hooks/settings.local.json     # Auto-archive hook config
 ```
 
@@ -84,7 +86,7 @@ uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook c
 
 ## Dependencies
 
-- Python 3.10+
+- Python 3.12+
 - `claude-code-transcripts` (installed automatically)
 - `pandoc` + `lualatex` (optional, for PDF generation)
 
