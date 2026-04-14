@@ -11,13 +11,5 @@
   "homepage": "https://github.com/Denubis/claude-code-research-transcript-hook",
   "repository": "https://github.com/Denubis/claude-code-research-transcript-hook",
   "license": "MIT",
-  "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"],
-
-  "commands": [
-    "../commands/transcript.md"
-  ],
-
-  "skills": [
-    "../skills/transcript/SKILL.md"
-  ]
+  "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"]
 }

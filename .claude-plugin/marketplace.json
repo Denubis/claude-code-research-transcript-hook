@@ -1,0 +1,25 @@
+{
+  "name": "transcript-archive-marketplace",
+  "owner": {
+    "name": "Brian Ballsun-Stanton",
+    "email": "brian.ballsun-stanton@mq.edu.au"
+  },
+  "metadata": {
+    "description": "Archive Claude Code conversations with research-grade metadata using the IDW2025 reproducibility framework"
+  },
+  "plugins": [
+    {
+      "name": "transcript-archive",
+      "source": "./",
+      "description": "Archive Claude Code conversations with research-grade metadata (IDW2025 framework) - generates HTML, markdown, and PDF exports",
+      "version": "0.4.0",
+      "author": {
+        "name": "Brian Ballsun-Stanton",
+        "email": "brian.ballsun-stanton@mq.edu.au"
+      },
+      "license": "MIT",
+      "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"],
+      "category": "research"
+    }
+  ]
+}

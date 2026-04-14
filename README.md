@@ -18,7 +18,8 @@ Archive [Claude Code](https://docs.anthropic.com/en/docs/claude-code) conversati
 ### As a Claude Code plugin (recommended)
 
 ```bash
-/plugin install https://github.com/Denubis/claude-code-research-transcript-hook
+/plugin marketplace add Denubis/claude-code-research-transcript-hook
+/plugin install transcript-archive@transcript-archive-marketplace
 ```
 
 This installs the `/transcript` command and the transcript archive skill automatically.

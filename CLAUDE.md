@@ -5,6 +5,7 @@ Archive Claude Code conversations with research-grade metadata using the IDW2025
 ## Project Structure
 
 ```text
+.claude-plugin/marketplace.json        # Marketplace catalog (self-referencing)
 .claude-plugin/plugin.json            # Plugin manifest
 commands/transcript.md                # /transcript slash command
 skills/transcript/SKILL.md            # Transcript archive skill
@@ -75,7 +76,8 @@ Sessions from hooks are marked `needs_review: true`. Run `/transcript` to comple
 
 ```bash
 # As a Claude Code plugin (includes /transcript command and skill)
-/plugin install https://github.com/Denubis/claude-code-research-transcript-hook
+/plugin marketplace add Denubis/claude-code-research-transcript-hook
+/plugin install transcript-archive@transcript-archive-marketplace
 
 # CLI tool only (global)
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
