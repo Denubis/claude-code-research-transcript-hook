@@ -128,8 +128,7 @@ claude-research-transcript clean --execute    # actually apply changes
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
 
 # Install plugin (includes /transcript command)
-/plugin marketplace add Denubis/claude-code-research-transcript-hook
-/plugin install transcript-archive@transcript-archive
+/plugin install https://github.com/Denubis/claude-code-research-transcript-hook
 ```
 
 ## Dependencies

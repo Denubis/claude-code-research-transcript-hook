@@ -72,17 +72,14 @@ Sessions from hooks are marked `needs_review: true`. Run `/transcript` to comple
 ## Installation
 
 ```bash
-# Global install
+# As a Claude Code plugin (includes /transcript command and skill)
+/plugin install https://github.com/Denubis/claude-code-research-transcript-hook
+
+# CLI tool only (global)
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
 
-# Per-repo
+# CLI tool only (per-repo, no install)
 uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript --local
-```
-
-Copy slash command:
-
-```bash
-cp claude-commands/transcript.md ~/.claude/commands/
 ```
 
 ## Dependencies

@@ -14,10 +14,10 @@
   "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"],
 
   "commands": [
-    "./commands/transcript.md"
+    "../commands/transcript.md"
   ],
 
   "skills": [
-    "./skills/transcript/SKILL.md"
+    "../skills/transcript/SKILL.md"
   ]
 }
