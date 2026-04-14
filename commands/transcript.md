@@ -1,6 +1,6 @@
 ---
-description: Archive this conversation with research metadata (IDW2025 framework)
-allowed-tools: Bash, Read, AskUserQuestion
+description: Archive a conversation with research metadata (IDW2025 framework). Optionally pass a session UUID to archive a prior session.
+allowed-tools: Bash, Read, Write, AskUserQuestion
 model: sonnet
 ---
 
@@ -10,11 +10,31 @@ You are helping the user create a research-grade archive of this conversation us
 
 **IMPORTANT**: This is an INTERACTIVE process. You MUST use the AskUserQuestion tool to gather metadata before archiving. Do NOT skip straight to archiving.
 
+## Invocation Modes
+
+This command can be invoked two ways:
+
+1. **Current session** (`/transcript`): Analyze the current conversation.
+2. **Prior session by UUID** (`/transcript <session-uuid>`): Archive a previously completed session by reading its JSONL transcript file.
+
 ## Your Task
+
+### Step 0: Resolve the Transcript Source
+
+If a **session UUID** was provided as an argument:
+
+1. Derive the transcript path:
+   - Encode the current working directory: strip leading `/`, replace all `/` with `-`
+   - Path: `~/.claude/projects/-<encoded-cwd>/<session-uuid>.jsonl`
+2. Use the **Read** tool to read the JSONL file (it may be large — read the first 500 lines to get the conversation content).
+3. Extract user messages (`"type": "user"`) and assistant text responses to understand what the session was about.
+4. Proceed to Step 1 using what you read from the JSONL, NOT the current conversation.
+
+If **no UUID** was provided, analyze the current conversation as before.
 
 ### Step 1: Analyze the Conversation
 
-Review the full conversation and identify:
+Review the conversation (current session or JSONL content) and identify:
 
 1. A proposed **Title** (3-7 words)
 2. Draft **Three Ps** (IDW2025 framework):
@@ -78,7 +98,9 @@ questions:
 
 ### Step 4: Execute Archive
 
-ONLY after the user confirms, run the archive command with all the gathered metadata:
+ONLY after the user confirms, run the archive command with all the gathered metadata.
+
+**For the current session** (no UUID):
 
 ```bash
 claude-research-transcript --retitle --local \
@@ -88,7 +110,65 @@ claude-research-transcript --retitle --local \
   --provenance "The Provenance summary you drafted"
 ```
 
+**For a prior session** (UUID provided):
+
+```bash
+claude-research-transcript --retitle --local \
+  --session-id "THE-SESSION-UUID" \
+  --transcript "~/.claude/projects/-<encoded-cwd>/<session-uuid>.jsonl" \
+  --title "YOUR CONFIRMED TITLE" \
+  --prompt "The Prompt summary you drafted" \
+  --process "The Process summary you drafted" \
+  --provenance "The Provenance summary you drafted"
+```
+
 **IMPORTANT**: You MUST pass all three `--prompt`, `--process`, and `--provenance` arguments. This marks the archive as fully reviewed (no `needs_review` flag).
+
+### Step 5: Generate Markdown Summary
+
+After archiving, create a `SUMMARY.md` file in the archive directory (`./ai_transcripts/[date]-[title]/`) using the Write tool:
+
+```markdown
+# [Title]
+
+**Date**: [YYYY-MM-DD]
+**Duration**: [X minutes]
+**Model**: [model used]
+
+## Three Ps (IDW2025 Framework)
+
+### Prompt
+[What the user was trying to accomplish]
+
+### Process
+[How Claude Code was used]
+
+### Provenance
+[Role in broader research/project context]
+
+## Key Artifacts
+
+### Created
+- [file1.py] - [brief description]
+- [file2.md] - [brief description]
+
+### Modified
+- [file3.py] - [what changed]
+
+## Session Statistics
+
+- **Turns**: [N]
+- **Tool calls**: [N total]
+- **Estimated cost**: $[X.XX]
+
+## Tags
+[tag1], [tag2], [tag3]
+
+---
+*Archived with transcript-archive*
+```
+
+Extract the statistics from `session.meta.json` to populate it accurately.
 
 ## After Archiving
 
@@ -96,7 +176,9 @@ Tell the user:
 
 1. Where the archive was saved (always `./ai_transcripts/` in current project)
 2. Available outputs:
+   - `SUMMARY.md` - Human-readable summary
    - `index.html` - Full HTML transcript with tool details
    - `conversation.md` - Readable markdown of the conversation
    - `conversation.pdf` - Styled PDF with speaker turn borders
-3. The `session.meta.json` contains the full Three Ps metadata
+   - `session.meta.json` - Complete structured metadata
+3. The archive follows the IDW2025 reproducibility framework
