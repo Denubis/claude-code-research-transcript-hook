@@ -31,7 +31,7 @@ This installs the `/transcript` command and the transcript archive skill automat
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
 
 # Per-repo with uvx
-uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript --local
+uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript archive --local
 
 # Using pipx
 pipx install git+https://github.com/Denubis/claude-code-research-transcript-hook
@@ -74,9 +74,18 @@ Claude will:
 ### Command-line options
 
 ```text
-claude-research-transcript [OPTIONS]
+claude-research-transcript <subcommand> [OPTIONS]
 
-Options:
+Subcommands:
+  archive      Archive a single session (what Stop hooks call)
+  init         Initialize transcript archiving for a repo
+  status       Report archived / needs-review / unarchived counts
+  bulk         Archive every unarchived session
+  update       Edit metadata on an existing archive
+  regenerate   Re-render HTML/PDF/markdown from the raw backup
+  clean        Deduplicate, migrate legacy, repair indexes
+
+Common `archive` options:
   --title TITLE    Title for the transcript
   --retitle        Force regenerate title/rename directory
   --force          Regenerate even if transcript unchanged
@@ -85,7 +94,7 @@ Options:
   --quiet          Suppress error messages
 
 Input: JSON payload on stdin with transcript_path and session_id
-       (automatically provided by Claude Code hooks)
+       (automatically provided by Claude Code Stop hooks)
 ```
 
 ### Archive locations

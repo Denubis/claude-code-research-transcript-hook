@@ -103,7 +103,7 @@ ONLY after the user confirms, run the archive command with all the gathered meta
 **For the current session** (no UUID):
 
 ```bash
-claude-research-transcript --retitle --local \
+claude-research-transcript archive --retitle --local \
   --title "YOUR CONFIRMED TITLE" \
   --prompt "The Prompt summary you drafted" \
   --process "The Process summary you drafted" \
@@ -113,7 +113,7 @@ claude-research-transcript --retitle --local \
 **For a prior session** (UUID provided):
 
 ```bash
-claude-research-transcript --retitle --local \
+claude-research-transcript archive --retitle --local \
   --session-id "THE-SESSION-UUID" \
   --transcript "~/.claude/projects/-<encoded-cwd>/<session-uuid>.jsonl" \
   --title "YOUR CONFIRMED TITLE" \

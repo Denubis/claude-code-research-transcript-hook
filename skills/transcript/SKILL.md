@@ -20,6 +20,10 @@ Archive Claude Code conversations with research-grade metadata using the IDW2025
 
 **Command:** `/transcript` or `/transcript <session-uuid>`
 
+**Raw CLI (when not using the slash command):** `claude-research-transcript archive [OPTIONS]` — the `archive` subcommand is required; `claude-research-transcript --local` without a verb fails.
+
+**Worktree / subdir sessions:** auto-discovery scans the cwd slug, the git-root slug, and every worktree slug under `~/.claude/projects/`. If it still can't find a JSONL the error prints the exact slugs it searched — pass `--transcript PATH --session-id UUID` explicitly for sessions that live outside that set.
+
 **Outputs generated:**
 | File | Description |
 |------|-------------|

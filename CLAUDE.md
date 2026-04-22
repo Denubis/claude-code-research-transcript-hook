@@ -35,8 +35,13 @@ When archiving via the interactive `/transcript` command:
 ## CLI Usage
 
 ```bash
-claude-research-transcript [OPTIONS]
+claude-research-transcript <subcommand> [OPTIONS]
 
+# Subcommands: archive (single-session archive, what hooks call),
+#              init, status, bulk, update, regenerate, clean.
+# See skills/transcript/SKILL.md for the full reference.
+
+# Flags below apply to `archive`:
 --title TITLE          # Title for the transcript
 --retitle              # Force regenerate title/rename directory
 --force                # Regenerate even if unchanged
@@ -83,7 +88,7 @@ Sessions from hooks are marked `needs_review: true`. Run `/transcript` to comple
 uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
 
 # CLI tool only (per-repo, no install)
-uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript --local
+uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript archive --local
 ```
 
 ## Dependencies
@@ -99,5 +104,5 @@ uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook c
 uv tool install . --force
 
 # Test with a transcript
-echo '{"transcript_path": "/path/to/transcript.jsonl", "session_id": "abc123"}' | claude-research-transcript --title "Test"
+echo '{"transcript_path": "/path/to/transcript.jsonl", "session_id": "abc123"}' | claude-research-transcript archive --title "Test"
 ```

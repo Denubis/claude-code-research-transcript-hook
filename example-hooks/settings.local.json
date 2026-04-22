@@ -3,7 +3,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "claude-research-transcript --local"
+        "command": "claude-research-transcript archive --local --quiet"
       }
     ]
   }
