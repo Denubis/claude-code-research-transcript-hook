@@ -40,10 +40,17 @@ def resolve_worktrees() -> list[Path]:
 def _encode_cc_path(resolved: str) -> str:
     """Apply Claude Code's path-to-directory-name encoding to a resolved path string.
 
-    Replaces the Windows drive-letter colon and both separator styles with '-'.
-    Example: ``'C:\\\\Users\\\\a\\\\proj'`` -> ``'C--Users-a-proj'``.
+    Replaces the Windows drive-letter colon, both separator styles, and
+    underscores with '-'. Claude Code normalises '_' to '-' in project slugs
+    (e.g. 'shifted_base' on disk becomes 'shifted-base' in ~/.claude/projects/).
+    Example: ``'C:\\\\Users\\\\a\\\\foo_bar'`` -> ``'C--Users-a-foo-bar'``.
     """
-    return resolved.replace(":", "-").replace("\\", "-").replace("/", "-")
+    return (
+        resolved.replace(":", "-")
+        .replace("\\", "-")
+        .replace("/", "-")
+        .replace("_", "-")
+    )
 
 
 def get_cc_project_path(project_dir: Path) -> str:
