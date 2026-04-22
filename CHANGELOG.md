@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## transcript-archive 0.4.1
+
+Patch release restoring the documented `claude-research-transcript` binary name, widening transcript auto-discovery across worktrees and git roots, and refreshing every doc surface that referenced the pre-v2 single-command CLI shape.
 
 **Fixed:**
 - Restored documented binary name `claude-research-transcript` as the sole entry point. v0.4.0 had accidentally shipped the binary as `claude-transcript-archive`, drifting from the skill, README, CLAUDE.md, and every documented example. `init` now writes the canonical name into the Stop hook; `archive.py` error messages point at the canonical name.
