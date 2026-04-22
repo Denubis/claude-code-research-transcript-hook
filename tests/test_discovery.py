@@ -11,8 +11,10 @@ from claude_transcript_archive.discovery import (
     auto_discover_transcript,
     discover_sessions,
     get_archive_dir,
+    get_candidate_project_dirs,
     get_cc_project_path,
     get_project_dir_from_transcript,
+    get_searched_project_slugs,
     load_project_defaults,
     resolve_worktrees,
 )
@@ -184,6 +186,195 @@ class TestAutoDiscoverTranscript:
         path, session_id = result
         assert path == transcript
         assert session_id == "abc123-def456"
+
+    def test_falls_back_to_git_root_slug(self, temp_dir, monkeypatch):
+        """When cwd slug has no JSONL but git-root slug does, auto-discover finds it.
+
+        Reproduces the reported failure: session started at repo root, user then
+        cd'd into a worktree / subdir before invoking the archive CLI — cwd slug
+        is empty, but the parent (git-root) slug holds the real JSONL.
+        """
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        repo_root = temp_dir / "repo"
+        subdir = repo_root / "subdir"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        # Stub out git rev-parse and worktree list so we don't need a real repo.
+        def fake_run(cmd, *_a, **_kw):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return type("R", (), {"stdout": f"{repo_root}\n", "returncode": 0})()
+            if cmd[:3] == ["git", "worktree", "list"]:
+                return type("R", (), {"stdout": f"worktree {repo_root}\n", "returncode": 0})()
+            raise AssertionError(f"unexpected git call: {cmd}")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        root_slug_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(repo_root)
+        root_slug_dir.mkdir(parents=True)
+        transcript = root_slug_dir / "root-session-uuid.jsonl"
+        transcript.write_text("{}", encoding="utf-8")
+
+        result = auto_discover_transcript()
+        assert result is not None
+        path, session_id = result
+        assert path == transcript
+        assert session_id == "root-session-uuid"
+
+    def test_falls_back_to_worktree_slug(self, temp_dir, monkeypatch):
+        """Session JSONL living under a sibling worktree's slug is still found."""
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        main = temp_dir / "repo"
+        worktree = temp_dir / "repo" / ".worktrees" / "feat-x"
+        worktree.mkdir(parents=True)
+        monkeypatch.chdir(main)  # invoked from main, session lived in worktree
+
+        def fake_run(cmd, *_a, **_kw):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return type("R", (), {"stdout": f"{main}\n", "returncode": 0})()
+            if cmd[:3] == ["git", "worktree", "list"]:
+                stdout = f"worktree {main}\nworktree {worktree}\n"
+                return type("R", (), {"stdout": stdout, "returncode": 0})()
+            raise AssertionError(f"unexpected git call: {cmd}")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        wt_slug_dir = temp_dir / ".claude" / "projects" / get_cc_project_path(worktree)
+        wt_slug_dir.mkdir(parents=True)
+        transcript = wt_slug_dir / "worktree-session.jsonl"
+        transcript.write_text("{}", encoding="utf-8")
+
+        result = auto_discover_transcript()
+        assert result is not None
+        assert result[0] == transcript
+        assert result[1] == "worktree-session"
+
+    def test_most_recent_wins_across_candidates(self, temp_dir, monkeypatch):
+        """When multiple candidate slugs hold JSONLs, the newest mtime wins."""
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        main = temp_dir / "repo"
+        worktree = temp_dir / "repo" / ".worktrees" / "feat-x"
+        worktree.mkdir(parents=True)
+        monkeypatch.chdir(main)
+
+        def fake_run(cmd, *_a, **_kw):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return type("R", (), {"stdout": f"{main}\n", "returncode": 0})()
+            if cmd[:3] == ["git", "worktree", "list"]:
+                stdout = f"worktree {main}\nworktree {worktree}\n"
+                return type("R", (), {"stdout": stdout, "returncode": 0})()
+            raise AssertionError(f"unexpected git call: {cmd}")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        main_slug = temp_dir / ".claude" / "projects" / get_cc_project_path(main)
+        wt_slug = temp_dir / ".claude" / "projects" / get_cc_project_path(worktree)
+        main_slug.mkdir(parents=True)
+        wt_slug.mkdir(parents=True)
+
+        older = main_slug / "old.jsonl"
+        older.write_text("{}", encoding="utf-8")
+        import os  # noqa: PLC0415
+
+        os.utime(older, (1_000_000_000, 1_000_000_000))
+
+        newer = wt_slug / "new.jsonl"
+        newer.write_text("{}", encoding="utf-8")
+        os.utime(newer, (2_000_000_000, 2_000_000_000))
+
+        result = auto_discover_transcript()
+        assert result is not None
+        assert result[0] == newer
+        assert result[1] == "new"
+
+    def test_non_git_cwd_uses_cwd_only(self, temp_dir, monkeypatch):
+        """Outside a git repo, auto-discover still searches the cwd slug."""
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        monkeypatch.chdir(temp_dir)
+        import subprocess as sp  # noqa: PLC0415
+
+        def fake_run(*_a, **_kw):
+            raise sp.CalledProcessError(128, "git")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        cwd_slug = temp_dir / ".claude" / "projects" / get_cc_project_path(temp_dir)
+        cwd_slug.mkdir(parents=True)
+        transcript = cwd_slug / "only.jsonl"
+        transcript.write_text("{}", encoding="utf-8")
+
+        result = auto_discover_transcript()
+        assert result is not None
+        assert result[0] == transcript
+
+
+class TestGetCandidateProjectDirs:
+    def test_non_git_returns_cwd_only(self, temp_dir, monkeypatch):
+        monkeypatch.chdir(temp_dir)
+        import subprocess as sp  # noqa: PLC0415
+
+        def fake_run(*_a, **_kw):
+            raise sp.CalledProcessError(128, "git")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        result = get_candidate_project_dirs()
+        assert result == [temp_dir.resolve()]
+
+    def test_git_repo_includes_root_and_worktrees(self, temp_dir, monkeypatch):
+        main = temp_dir / "repo"
+        worktree = temp_dir / "repo" / ".worktrees" / "feat-x"
+        worktree.mkdir(parents=True)
+        subdir = main / "sub"
+        subdir.mkdir()
+        monkeypatch.chdir(subdir)
+
+        def fake_run(cmd, *_a, **_kw):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return type("R", (), {"stdout": f"{main}\n", "returncode": 0})()
+            if cmd[:3] == ["git", "worktree", "list"]:
+                stdout = f"worktree {main}\nworktree {worktree}\n"
+                return type("R", (), {"stdout": stdout, "returncode": 0})()
+            raise AssertionError(f"unexpected git call: {cmd}")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        result = get_candidate_project_dirs()
+        # cwd first, then git root, then worktrees — and no duplicates.
+        assert result[0] == subdir.resolve()
+        assert main.resolve() in result
+        assert worktree.resolve() in result
+        assert len(result) == len(set(result))
+
+
+class TestGetSearchedProjectSlugs:
+    def test_produces_one_slug_path_per_candidate(self, temp_dir, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: temp_dir)
+        monkeypatch.chdir(temp_dir)
+        import subprocess as sp  # noqa: PLC0415
+
+        def fake_run(*_a, **_kw):
+            raise sp.CalledProcessError(128, "git")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.subprocess.run", fake_run
+        )
+
+        result = get_searched_project_slugs()
+        assert len(result) == 1
+        assert result[0].parent == temp_dir / ".claude" / "projects"
 
 
 # =============================================================================

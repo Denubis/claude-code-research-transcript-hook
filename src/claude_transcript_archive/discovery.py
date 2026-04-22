@@ -197,29 +197,91 @@ def get_project_dir_from_transcript(transcript_path: Path) -> Path | None:
     return None
 
 
-def auto_discover_transcript() -> tuple[Path, str] | None:
-    """Auto-discover the most recent transcript for the current project.
+def get_candidate_project_dirs() -> list[Path]:
+    """Collect candidate project directories for auto-discovery.
 
-    Returns (transcript_path, session_id) or None if not found.
+    Union of cwd, git repository root, and all git worktree paths — covers the
+    case where a session's JSONL lives under the main-repo slug while the CLI
+    is invoked from a worktree subdirectory (or vice versa). Falls back to
+    [cwd] when not inside a git repository.
+
+    Order matters for caller-facing error messages (cwd first, then git root,
+    then worktrees in the order git reports them); auto_discover_transcript
+    itself dedupes and picks by mtime.
     """
-    encoded_path = get_cc_project_path(Path.cwd())
-    projects_dir = Path.home() / ".claude" / "projects" / encoded_path
+    cwd = Path.cwd().resolve()
+    candidates: list[Path] = [cwd]
 
-    if not projects_dir.exists():
-        return None
+    try:
+        git_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        ).resolve()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return candidates
 
-    # Find most recent .jsonl file
-    jsonl_files = list(projects_dir.glob("*.jsonl"))
+    if git_root not in candidates:
+        candidates.append(git_root)
+
+    try:
+        worktrees = resolve_worktrees()
+    except RuntimeError:
+        return candidates
+
+    for wt in worktrees:
+        wt_resolved = wt.resolve()
+        if wt_resolved not in candidates:
+            candidates.append(wt_resolved)
+
+    return candidates
+
+
+def get_searched_project_slugs() -> list[Path]:
+    """Return the ~/.claude/projects/<slug>/ paths auto_discover_transcript scans.
+
+    Used by callers to render helpful error messages listing exactly where the
+    tool looked before giving up.
+    """
+    home = Path.home()
+    return [
+        home / ".claude" / "projects" / get_cc_project_path(d)
+        for d in get_candidate_project_dirs()
+    ]
+
+
+def auto_discover_transcript() -> tuple[Path, str] | None:
+    """Auto-discover the most-recent transcript across candidate project dirs.
+
+    Scans ~/.claude/projects/<slug>/ for each candidate returned by
+    get_candidate_project_dirs() (cwd, git root, all worktrees), unions the
+    resulting *.jsonl files, and returns the one with the most recent mtime.
+
+    Returns (transcript_path, session_id) or None if no candidate dir
+    contains a JSONL.
+    """
+    home = Path.home()
+    seen: set[Path] = set()
+    jsonl_files: list[Path] = []
+
+    for candidate in get_candidate_project_dirs():
+        projects_dir = home / ".claude" / "projects" / get_cc_project_path(candidate)
+        if not projects_dir.is_dir():
+            continue
+        for jsonl in projects_dir.glob("*.jsonl"):
+            if jsonl not in seen:
+                seen.add(jsonl)
+                jsonl_files.append(jsonl)
+
     if not jsonl_files:
         return None
 
-    # Sort by modification time, most recent first
     jsonl_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     transcript_path = jsonl_files[0]
-
-    # Session ID is the filename without extension
     session_id = transcript_path.stem
-
     return transcript_path, session_id
 
 

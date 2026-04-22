@@ -103,9 +103,14 @@ def archive(
                 transcript_path, sid = discovered
                 _archive.log_info(f"Auto-discovered: {transcript_path}", quiet)
             else:
+                searched = "\n".join(
+                    f"  {p}" for p in _discovery.get_searched_project_slugs()
+                )
                 _archive.log_error(
-                    "No transcript found. Run from a project directory or use "
-                    "--transcript and --session-id arguments.",
+                    "No transcript found. Searched:\n"
+                    f"{searched}\n"
+                    "Pass --transcript PATH --session-id UUID to archive a "
+                    "session that lives outside these project slugs.",
                     quiet,
                 )
                 raise typer.Exit(code=1)
