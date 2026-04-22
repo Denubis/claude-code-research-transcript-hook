@@ -5,18 +5,25 @@ Archive Claude Code conversations with research-grade metadata using the IDW2025
 ## Project Structure
 
 ```text
-.claude-plugin/marketplace.json        # Marketplace catalog (self-referencing)
-.claude-plugin/plugin.json            # Plugin manifest
-commands/transcript.md                # /transcript slash command
-skills/transcript/SKILL.md            # Transcript archive skill
-src/claude_transcript_archive/cli.py  # Main CLI implementation
-example-hooks/settings.local.json     # Auto-archive hook config
+.claude-plugin/marketplace.json           # Marketplace catalog (self-referencing)
+.claude-plugin/plugin.json                # Plugin manifest
+commands/transcript.md                    # /transcript slash command
+skills/transcript/SKILL.md                # Transcript archive skill
+example-hooks/settings.local.json         # Auto-archive hook config
+src/claude_transcript_archive/
+    __main__.py                           # `python -m` entry point
+    cli.py                                # Typer app, subcommand dispatch
+    archive.py                            # Archive orchestration, skip detection
+    discovery.py                          # Worktree-aware transcript discovery
+    catalog.py                            # Manifest and CATALOG.json management
+    metadata.py                           # JSONL parsing, token/cost extraction
+    output.py                             # HTML, markdown, PDF generation
 ```
 
 ## How It Works
 
-1. Claude Code hooks provide `{"transcript_path": "...", "session_id": "..."}` via JSON on stdin
-2. Script extracts rich metadata (tokens, costs, tool calls, artifacts, relationships)
+1. Claude Code hooks invoke `claude-research-transcript archive` and pipe `{"transcript_path": "...", "session_id": "..."}` via JSON on stdin
+2. The `archive` subcommand extracts rich metadata (tokens, costs, tool calls, artifacts, relationships)
 3. Generates HTML using `claude-code-transcripts`
 4. Archives organized as `YYYY-MM-DD-title-slug/` directories
 5. Metadata sidecar files (`session.meta.json`) stored in archive AND next to original
@@ -62,6 +69,10 @@ claude-research-transcript <subcommand> [OPTIONS]
 - **Hook mode (default):** Receives JSON via stdin from Claude Code hooks
 - **Manual mode:** Use `--transcript` and `--session-id` together for direct invocation
 - **Interactive mode:** The `/transcript` command gathers Three Ps interactively
+
+### Auto-discovery
+
+When `archive` runs with no stdin JSON and no `--transcript`/`--session-id`, it searches `~/.claude/projects/<slug>/` for cwd, the enclosing git root, and every `git worktree list` path, then picks the most-recent `.jsonl` by mtime. If nothing is found, the error lists every slug scanned and names `--transcript PATH --session-id UUID` as the explicit escape hatch.
 
 ## Archive Locations
 
