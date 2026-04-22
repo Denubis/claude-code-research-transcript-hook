@@ -264,13 +264,13 @@ def archive(
                 log_info(f"Re-mounted worktree at {archive_dir}", quiet)
             else:
                 log_error(
-                    "No transcripts branch found. Run 'claude-transcript-archive init' first.",
+                    "No transcripts branch found. Run 'claude-research-transcript init' first.",
                     quiet,
                 )
                 return None
         except (subprocess.CalledProcessError, FileNotFoundError):
             log_error(
-                "Git error during mount recovery. Run 'claude-transcript-archive init' first.",
+                "Git error during mount recovery. Run 'claude-research-transcript init' first.",
                 quiet,
             )
             return None

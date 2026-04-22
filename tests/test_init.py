@@ -116,7 +116,7 @@ class TestInitHookInstallation:
         assert "hooks" in settings
         assert "Stop" in settings["hooks"]
         commands = [h["command"] for h in settings["hooks"]["Stop"]]
-        assert "claude-transcript-archive archive --quiet" in commands
+        assert "claude-research-transcript archive --quiet" in commands
 
     def test_preserves_existing_hooks(self, temp_dir):
         """Existing file with other hooks -> appends our hook."""
@@ -136,7 +136,7 @@ class TestInitHookInstallation:
         settings = json.loads((claude_dir / "settings.local.json").read_text())
         commands = [h["command"] for h in settings["hooks"]["Stop"]]
         assert "other-tool --run" in commands
-        assert "claude-transcript-archive archive --quiet" in commands
+        assert "claude-research-transcript archive --quiet" in commands
 
     def test_hook_idempotent(self, temp_dir):
         """Our hook already present -> no change."""
@@ -150,7 +150,7 @@ class TestInitHookInstallation:
         settings = json.loads((temp_dir / ".claude" / "settings.local.json").read_text())
         # Should only have our hook once
         commands = [h["command"] for h in settings["hooks"]["Stop"]]
-        assert commands.count("claude-transcript-archive archive --quiet") == 1
+        assert commands.count("claude-research-transcript archive --quiet") == 1
 
 
 class TestInitProjectDefaults:
@@ -241,7 +241,7 @@ class TestInitIntegration:
         # Hook installed
         settings = json.loads((temp_dir / ".claude" / "settings.local.json").read_text())
         assert any(
-            h.get("command") == "claude-transcript-archive archive --quiet"
+            h.get("command") == "claude-research-transcript archive --quiet"
             for h in settings.get("hooks", {}).get("Stop", [])
         )
 
@@ -261,6 +261,6 @@ class TestInitIntegration:
         stop_hooks = settings2.get("hooks", {}).get("Stop", [])
         our_hooks = [
             h for h in stop_hooks
-            if h.get("command") == "claude-transcript-archive archive --quiet"
+            if h.get("command") == "claude-research-transcript archive --quiet"
         ]
         assert len(our_hooks) == 1

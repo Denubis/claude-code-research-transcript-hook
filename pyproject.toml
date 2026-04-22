@@ -28,13 +28,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0",
     "ruff>=0.9",
 ]
 
 [project.scripts]
-claude-transcript-archive = "claude_transcript_archive.cli:app"
+claude-research-transcript = "claude_transcript_archive.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/Denubis/claude-code-research-transcript-hook"

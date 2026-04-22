@@ -287,7 +287,7 @@ def init(
 
     our_hook = {
         "type": "command",
-        "command": "claude-transcript-archive archive --quiet",
+        "command": "claude-research-transcript archive --quiet",
     }
 
     hooks = settings.setdefault("hooks", {})
