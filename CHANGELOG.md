@@ -1,5 +1,18 @@
 # Changelog
 
+## transcript-archive 0.5.0
+
+Windows portability release. Closes the remaining locale- and line-ending-dependent gaps so Windows contributors (notably @adivea, who has been flagging and fixing these) can pull and run without local tweaks.
+
+**Fixed:**
+- `_encode_cc_path` now also normalises `_` to `-`. Claude Code rewrites underscores in project slugs (a `shifted_base` directory becomes `shifted-base` under `~/.claude/projects/`), so without this, auto-discovery silently misses any project folder containing an underscore. ([#3](https://github.com/Denubis/claude-code-research-transcript-hook/pull/3) — Adela Sobotkova)
+- Every `subprocess.run(..., text=True, ...)` call in `cli.py`, `archive.py`, `discovery.py`, and `output.py` now also pins `encoding="utf-8"`. On Windows cp1252 locales the previous code raised `UnicodeDecodeError` the moment a repo path contained a non-ASCII character.
+- `init()` step 4 now reads and appends to `.gitignore` with `encoding="utf-8"`. The only remaining locale-dependent text I/O in the package; matches the rest of the codebase.
+
+**Added:**
+- `.gitattributes` with `* text=auto eol=lf` plus binary marks for common image/PDF extensions, so Windows checkouts no longer introduce CRLF churn that has to be reverted before any commit.
+- `TestEncodeCCPath` regression cases for underscore-to-hyphen normalisation (POSIX + Windows literals, plus a "no `_` may leak through" assertion).
+
 ## transcript-archive 0.4.1
 
 Patch release restoring the documented `claude-research-transcript` binary name, widening transcript auto-discovery across worktrees and git roots, and refreshing every doc surface that referenced the pre-v2 single-command CLI shape.

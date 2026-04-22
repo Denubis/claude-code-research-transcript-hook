@@ -12,7 +12,7 @@
       "name": "transcript-archive",
       "source": "./",
       "description": "Archive Claude Code conversations with research-grade metadata (IDW2025 framework) - generates HTML, markdown, and PDF exports",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "author": {
         "name": "Brian Ballsun-Stanton",
         "email": "brian.ballsun-stanton@mq.edu.au"
