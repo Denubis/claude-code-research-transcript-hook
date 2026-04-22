@@ -48,6 +48,20 @@ class TestEncodeCCPath:
         assert "/" not in encoded
         assert "\\" not in encoded
 
+    def test_underscores_normalised_to_hyphens(self):
+        """Claude Code rewrites '_' as '-' in project slugs (PR #3, observed on
+        Windows with directory names like 'shifted_base' and 'city_blocks')."""
+        assert _encode_cc_path("/home/user/shifted_base") == "-home-user-shifted-base"
+        assert (
+            _encode_cc_path("C:\\Users\\Adela\\geo_demo\\city_blocks")
+            == "C--Users-Adela-geo-demo-city-blocks"
+        )
+
+    def test_no_underscores_leak(self):
+        """Encoded output must contain no '_' since CC normalises them away."""
+        encoded = _encode_cc_path("/home/user/foo_bar_baz/qux_quux")
+        assert "_" not in encoded
+
 
 # =============================================================================
 # Test get_cc_project_path
