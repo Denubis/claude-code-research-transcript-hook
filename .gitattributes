@@ -1,0 +1,11 @@
+# Normalise all text files to LF in the repository and on every checkout,
+# so Windows users (with core.autocrlf=true) don't see whole-file CRLF diffs
+# the moment they pull.
+
+* text=auto eol=lf
+
+# Generated outputs that may end up tracked accidentally — keep binary.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary
