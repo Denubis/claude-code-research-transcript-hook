@@ -18,7 +18,7 @@ def resolve_worktrees() -> list[Path]:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
@@ -224,7 +224,7 @@ def get_candidate_project_dirs() -> list[Path]:
             subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             ).stdout.strip()
         ).resolve()

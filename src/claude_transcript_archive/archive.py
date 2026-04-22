@@ -162,7 +162,7 @@ def regenerate_outputs(session_dir: Path, *, quiet: bool = False) -> bool:
         subprocess.run(
             ["claude-code-transcripts", "json", str(raw_path), "-o", str(session_dir), "--json"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
 
@@ -249,7 +249,7 @@ def archive(
                 ["git", "branch", "--list", "transcripts"],
                 cwd=project_root,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             )
             if branch_check.stdout.strip():
@@ -258,7 +258,7 @@ def archive(
                     ["git", "worktree", "add", str(archive_dir), "transcripts"],
                     cwd=project_root,
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8",
                     check=True,
                 )
                 log_info(f"Re-mounted worktree at {archive_dir}", quiet)
@@ -357,7 +357,7 @@ def archive(
                 "--json",
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
         if result.returncode != 0:

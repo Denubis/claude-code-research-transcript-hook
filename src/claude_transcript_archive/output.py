@@ -525,7 +525,7 @@ def generate_conversation_pdf(
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=False,
                 timeout=120,  # 2 minutes should be plenty for PDF generation
             )

@@ -30,7 +30,7 @@ def _resolve_archive_dir() -> Path:
             subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             ).stdout.strip()
         )
@@ -185,7 +185,7 @@ def init(
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=True,
         )
         repo_root = Path(result.stdout.strip())
@@ -198,7 +198,7 @@ def init(
         ["git", "branch", "--list", "transcripts"],
         cwd=repo_root,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         check=True,
     )
     if not branch_check.stdout.strip():
@@ -207,7 +207,7 @@ def init(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo_root,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=True,
         )
         saved_ref = current.stdout.strip()
@@ -217,7 +217,7 @@ def init(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             )
             saved_ref = sha.stdout.strip()
@@ -227,14 +227,14 @@ def init(
                 ["git", "switch", "--orphan", "transcripts"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             )
             subprocess.run(
                 ["git", "commit", "--allow-empty", "-m", "init transcript archive"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=True,
             )
         finally:
@@ -243,7 +243,7 @@ def init(
                 ["git", "checkout", saved_ref],
                 cwd=repo_root,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 check=False,
             )
             if restore.returncode != 0:
@@ -262,7 +262,7 @@ def init(
             ["git", "worktree", "add", str(worktree_dir), "transcripts"],
             cwd=repo_root,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=True,
         )
         typer.echo(f"Mounted worktree at {worktree_dir}")
@@ -271,9 +271,11 @@ def init(
 
     # Step 4: Check/update .gitignore
     gitignore_path = repo_root / ".gitignore"
-    existing = gitignore_path.read_text() if gitignore_path.exists() else ""
+    existing = (
+        gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    )
     if not any(line.strip() == ".ai-transcripts/" for line in existing.splitlines()):
-        with gitignore_path.open("a") as f:
+        with gitignore_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write(".ai-transcripts/\n")
@@ -372,7 +374,7 @@ def status(
                 subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8",
                     check=True,
                 ).stdout.strip()
             )
@@ -492,7 +494,7 @@ def bulk(
                 subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8",
                     check=True,
                 ).stdout.strip()
             )
@@ -686,7 +688,7 @@ def clean(
         repo_root = Path(
             subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, encoding="utf-8", check=True,
             ).stdout.strip()
         )
     except subprocess.CalledProcessError:
