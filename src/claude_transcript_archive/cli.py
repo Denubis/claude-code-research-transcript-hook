@@ -30,7 +30,8 @@ def _resolve_archive_dir() -> Path:
             subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=True,
             ).stdout.strip()
         )
@@ -103,9 +104,7 @@ def archive(
                 transcript_path, sid = discovered
                 _archive.log_info(f"Auto-discovered: {transcript_path}", quiet)
             else:
-                searched = "\n".join(
-                    f"  {p}" for p in _discovery.get_searched_project_slugs()
-                )
+                searched = "\n".join(f"  {p}" for p in _discovery.get_searched_project_slugs())
                 _archive.log_error(
                     "No transcript found. Searched:\n"
                     f"{searched}\n"
@@ -185,7 +184,8 @@ def init(
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True, encoding="utf-8",
+            text=True,
+            encoding="utf-8",
             check=True,
         )
         repo_root = Path(result.stdout.strip())
@@ -198,7 +198,8 @@ def init(
         ["git", "branch", "--list", "transcripts"],
         cwd=repo_root,
         capture_output=True,
-        text=True, encoding="utf-8",
+        text=True,
+        encoding="utf-8",
         check=True,
     )
     if not branch_check.stdout.strip():
@@ -207,7 +208,8 @@ def init(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo_root,
             capture_output=True,
-            text=True, encoding="utf-8",
+            text=True,
+            encoding="utf-8",
             check=True,
         )
         saved_ref = current.stdout.strip()
@@ -217,7 +219,8 @@ def init(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=True,
             )
             saved_ref = sha.stdout.strip()
@@ -227,14 +230,16 @@ def init(
                 ["git", "switch", "--orphan", "transcripts"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=True,
             )
             subprocess.run(
                 ["git", "commit", "--allow-empty", "-m", "init transcript archive"],
                 cwd=repo_root,
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=True,
             )
         finally:
@@ -243,7 +248,8 @@ def init(
                 ["git", "checkout", saved_ref],
                 cwd=repo_root,
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=False,
             )
             if restore.returncode != 0:
@@ -262,7 +268,8 @@ def init(
             ["git", "worktree", "add", str(worktree_dir), "transcripts"],
             cwd=repo_root,
             capture_output=True,
-            text=True, encoding="utf-8",
+            text=True,
+            encoding="utf-8",
             check=True,
         )
         typer.echo(f"Mounted worktree at {worktree_dir}")
@@ -271,9 +278,7 @@ def init(
 
     # Step 4: Check/update .gitignore
     gitignore_path = repo_root / ".gitignore"
-    existing = (
-        gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
-    )
+    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
     if not any(line.strip() == ".ai-transcripts/" for line in existing.splitlines()):
         with gitignore_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
@@ -361,9 +366,7 @@ def status(
     sessions = _discovery.discover_sessions()
 
     # Determine archive location
-    project_dir = (
-        _discovery.get_project_dir_from_transcript(sessions[0][0]) if sessions else None
-    )
+    project_dir = _discovery.get_project_dir_from_transcript(sessions[0][0]) if sessions else None
     defaults = _discovery.load_project_defaults(project_dir)
     target = defaults.get("target", "branch")
 
@@ -374,7 +377,8 @@ def status(
                 subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True,
-                    text=True, encoding="utf-8",
+                    text=True,
+                    encoding="utf-8",
                     check=True,
                 ).stdout.strip()
             )
@@ -399,37 +403,42 @@ def status(
         if session_id in manifest:
             # Check needs_review from catalog
             catalog_entry = next(
-                (
-                    s
-                    for s in catalog.get("sessions", [])
-                    if s.get("session_id") == session_id
-                ),
+                (s for s in catalog.get("sessions", []) if s.get("session_id") == session_id),
                 {},
             )
-            archived.append({
-                "session_id": session_id,
-                "transcript_path": str(transcript_path),
-                "needs_review": catalog_entry.get("needs_review", True),
-            })
+            archived.append(
+                {
+                    "session_id": session_id,
+                    "transcript_path": str(transcript_path),
+                    "needs_review": catalog_entry.get("needs_review", True),
+                }
+            )
         else:
             # Classify unarchived session
             content = (
                 transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
             )
             classification = _metadata.classify_session(content)
-            unarchived.append({
-                "session_id": session_id,
-                "transcript_path": str(transcript_path),
-                "classification": classification,
-            })
+            unarchived.append(
+                {
+                    "session_id": session_id,
+                    "transcript_path": str(transcript_path),
+                    "classification": classification,
+                }
+            )
 
     if json_output:
-        typer.echo(json.dumps({
-            "worktrees": len(worktrees),
-            "archived": archived,
-            "unarchived": unarchived,
-            "total": len(archived) + len(unarchived),
-        }, indent=2))
+        typer.echo(
+            json.dumps(
+                {
+                    "worktrees": len(worktrees),
+                    "archived": archived,
+                    "unarchived": unarchived,
+                    "total": len(archived) + len(unarchived),
+                },
+                indent=2,
+            )
+        )
     else:
         reviewed = sum(1 for s in archived if not s["needs_review"])
         needs_review = sum(1 for s in archived if s["needs_review"])
@@ -438,8 +447,7 @@ def status(
 
         repo_name = Path.cwd().name
         typer.echo(
-            f"Project: {repo_name}"
-            f" ({len(worktrees)} worktree{'s' if len(worktrees) != 1 else ''})"
+            f"Project: {repo_name} ({len(worktrees)} worktree{'s' if len(worktrees) != 1 else ''})"
         )
         typer.echo("")
         typer.echo(
@@ -451,6 +459,31 @@ def status(
             f" ({substantial} substantial, {trivial} trivial)"
         )
         typer.echo(f"  Total:       {len(archived) + len(unarchived)} sessions")
+
+        if unarchived:
+            typer.echo("")
+            typer.echo("Unarchived sessions:")
+            for entry in unarchived:
+                typer.echo(f"  [{entry['classification']:>11}] {entry['session_id']}")
+            typer.echo("")
+            typer.echo("  Archive all:   claude-research-transcript bulk")
+            typer.echo("  Archive one:   claude-research-transcript archive --session-id <UUID>")
+
+        review_targets = [s for s in archived if s["needs_review"]]
+        if review_targets:
+            typer.echo("")
+            typer.echo("Needs review:")
+            for entry in review_targets:
+                typer.echo(f"  {entry['session_id']}")
+            typer.echo("")
+            typer.echo(
+                "  Update one:    claude-research-transcript update"
+                " --session-id <UUID> --prompt ... --process ... --provenance ..."
+            )
+            typer.echo(
+                "  Update all:    claude-research-transcript update"
+                " --all-needs-review --tags ... --purpose ..."
+            )
 
 
 @app.command()
@@ -494,7 +527,8 @@ def bulk(
                 subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True,
-                    text=True, encoding="utf-8",
+                    text=True,
+                    encoding="utf-8",
                     check=True,
                 ).stdout.strip()
             )
@@ -646,9 +680,7 @@ def regenerate(
     elif all_sessions:
         target_dirs = [Path(d) for d in manifest.values()]
 
-    regenerated = sum(
-        _archive.regenerate_outputs(d, quiet=quiet) for d in target_dirs
-    )
+    regenerated = sum(_archive.regenerate_outputs(d, quiet=quiet) for d in target_dirs)
 
     if not quiet:
         typer.echo(f"Regenerated {regenerated} session(s)")
@@ -688,7 +720,10 @@ def clean(
         repo_root = Path(
             subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, encoding="utf-8", check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
             ).stdout.strip()
         )
     except subprocess.CalledProcessError:
