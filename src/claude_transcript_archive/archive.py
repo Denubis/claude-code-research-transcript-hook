@@ -14,6 +14,38 @@ from claude_transcript_archive import discovery as _discovery
 from claude_transcript_archive import metadata as _metadata
 from claude_transcript_archive import output as _output
 
+_NORMALISE_TEXT_SUFFIXES = frozenset({".md", ".html", ".json", ".jsonl", ".txt"})
+_NORMALISE_TEXT_NAMES = frozenset({".title", ".last_size"})
+
+
+def normalise_text_outputs(output_dir: Path) -> int:
+    """Strip trailing whitespace and collapse trailing newlines to one.
+
+    Walks output_dir recursively for files matching the text-suffix or
+    text-name allowlist; binaries (.pdf, etc.) and unrelated files are left
+    alone. Matches the rules pre-commit-hooks' ``trailing-whitespace`` and
+    ``end-of-file-fixer`` enforce, so the generated archive does not bounce
+    on every commit when stored in-tree. Returns the count of files rewritten.
+    """
+    rewritten = 0
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix not in _NORMALISE_TEXT_SUFFIXES and path.name not in _NORMALISE_TEXT_NAMES:
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = [line.rstrip() for line in original.splitlines()]
+        while lines and not lines[-1]:
+            lines.pop()
+        normalised = ("\n".join(lines) + "\n") if lines else ""
+        if normalised != original:
+            path.write_text(normalised, encoding="utf-8")
+            rewritten += 1
+    return rewritten
+
 
 def generate_title_from_content(content: str) -> str:
     """Generate a meaningful title from transcript content.
@@ -162,7 +194,8 @@ def regenerate_outputs(session_dir: Path, *, quiet: bool = False) -> bool:
         subprocess.run(
             ["claude-code-transcripts", "json", str(raw_path), "-o", str(session_dir), "--json"],
             capture_output=True,
-            text=True, encoding="utf-8",
+            text=True,
+            encoding="utf-8",
             check=False,
         )
 
@@ -176,6 +209,8 @@ def regenerate_outputs(session_dir: Path, *, quiet: bool = False) -> bool:
 
         pdf_path = session_dir / "conversation.pdf"
         _output.generate_conversation_pdf(messages, title, pdf_path, quiet=quiet, metadata=metadata)
+
+    normalise_text_outputs(session_dir)
 
     return True
 
@@ -249,7 +284,8 @@ def archive(
                 ["git", "branch", "--list", "transcripts"],
                 cwd=project_root,
                 capture_output=True,
-                text=True, encoding="utf-8",
+                text=True,
+                encoding="utf-8",
                 check=True,
             )
             if branch_check.stdout.strip():
@@ -258,7 +294,8 @@ def archive(
                     ["git", "worktree", "add", str(archive_dir), "transcripts"],
                     cwd=project_root,
                     capture_output=True,
-                    text=True, encoding="utf-8",
+                    text=True,
+                    encoding="utf-8",
                     check=True,
                 )
                 log_info(f"Re-mounted worktree at {archive_dir}", quiet)
@@ -357,7 +394,8 @@ def archive(
                 "--json",
             ],
             capture_output=True,
-            text=True, encoding="utf-8",
+            text=True,
+            encoding="utf-8",
             check=False,
         )
         if result.returncode != 0:
@@ -428,5 +466,9 @@ def archive(
 
     # Keep raw backup
     (output_dir / "raw-transcript.jsonl").write_text(content, encoding="utf-8")
+
+    # Normalise generated text artifacts so in-tree archives don't bounce
+    # commits on trailing-whitespace / end-of-file-fixer pre-commit hooks.
+    normalise_text_outputs(output_dir)
 
     return output_dir

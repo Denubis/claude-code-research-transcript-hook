@@ -35,13 +35,15 @@ class TestGenerateTitleFromContent:
 
     def test_removes_greetings(self):
         # Only removes greetings followed by whitespace
-        content = json.dumps({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": "Hello can you fix the bug?"}],
-            },
-        })
+        content = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Hello can you fix the bug?"}],
+                },
+            }
+        )
         title = generate_title_from_content(content)
         assert not title.lower().startswith("hello")
         assert "fix the bug" in title.lower()
@@ -52,82 +54,104 @@ class TestGenerateTitleFromContent:
 
     def test_truncation(self):
         long_text = "A" * 100
-        content = json.dumps({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": long_text}],
-            },
-        })
+        content = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": long_text}],
+                },
+            }
+        )
         title = generate_title_from_content(content)
         assert len(title) <= 60
 
     def test_skips_ide_opened_file(self):
         """Test that IDE context messages are skipped for title generation."""
         ide_msg = "<ide_opened_file>The user opened /path/to/file.py</ide_opened_file>"
-        content = "\n".join([
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": ide_msg}],
-                },
-            }),
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "Build a GUI for transcription"}],
-                },
-            }),
-        ])
+        content = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": ide_msg}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "Build a GUI for transcription"}],
+                        },
+                    }
+                ),
+            ]
+        )
         title = generate_title_from_content(content)
         assert "ide_opened_file" not in title.lower()
         assert "gui" in title.lower() or "transcription" in title.lower()
 
     def test_skips_ide_selection(self):
         """Test that IDE selection messages are skipped."""
-        content = "\n".join([
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "text",
-                        "text": "<ide_selection>selected code here</ide_selection>",
-                    }],
-                },
-            }),
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "Refactor this function"}],
-                },
-            }),
-        ])
+        content = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "<ide_selection>selected code here</ide_selection>",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "Refactor this function"}],
+                        },
+                    }
+                ),
+            ]
+        )
         title = generate_title_from_content(content)
         assert "ide_selection" not in title.lower()
         assert "refactor" in title.lower()
 
     def test_skips_short_messages(self):
         """Test that very short messages are skipped."""
-        content = "\n".join([
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "ok"}],
-                },
-            }),
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "Implement authentication"}],
-                },
-            }),
-        ])
+        content = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "ok"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "Implement authentication"}],
+                        },
+                    }
+                ),
+            ]
+        )
         title = generate_title_from_content(content)
         assert title != "ok"
         assert "authentication" in title.lower()
@@ -295,7 +319,7 @@ class TestArchiveFunction:
 
         session_dirs = list(archive_dir.glob("*custom-title*"))
         assert len(session_dirs) == 1
-        assert (session_dirs[0] / ".title").read_text() == "Custom Title"
+        assert (session_dirs[0] / ".title").read_text() == "Custom Title\n"
 
     def test_archive_skips_unchanged(self, temp_dir, sample_transcript_content):
         """Test that archive skips if file unchanged."""
@@ -456,36 +480,52 @@ class TestArchiveFunction:
 class TestEdgeCases:
     def test_extract_stats_with_file_history_snapshot(self):
         """Test that file-history-snapshot entries are skipped."""
-        content = json.dumps({
-            "type": "file-history-snapshot",
-            "timestamp": "2026-01-14T10:00:00.000Z",
-            "files": {},
-        })
+        content = json.dumps(
+            {
+                "type": "file-history-snapshot",
+                "timestamp": "2026-01-14T10:00:00.000Z",
+                "files": {},
+            }
+        )
         stats = extract_session_stats(content)
         assert stats["turns"] == 0
 
     def test_extract_artifacts_read_then_edit(self):
         """Test that files read then edited appear in modified, not referenced."""
-        content = "\n".join([
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "name": "Read", "input": {"file_path": "/test.py"}},
-                    ],
-                },
-            }),
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/test.py"}},
-                    ],
-                },
-            }),
-        ])
+        content = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "name": "Read",
+                                    "input": {"file_path": "/test.py"},
+                                },
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "name": "Edit",
+                                    "input": {"file_path": "/test.py"},
+                                },
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
         artifacts = extract_artifacts(content)
         assert len(artifacts["modified"]) == 1
         assert len(artifacts["referenced"]) == 0
@@ -667,12 +707,16 @@ class TestFindDuplicates:
         archive_dir = temp_dir / "archive"
         archive_dir.mkdir()
         for i in range(2):
-            d = archive_dir / f"2024-01-0{i+1}-session"
+            d = archive_dir / f"2024-01-0{i + 1}-session"
             d.mkdir()
-            (d / "session.meta.json").write_text(json.dumps({
-                "session": {"id": "same-session"},
-                "archive": {"directory_name": d.name},
-            }))
+            (d / "session.meta.json").write_text(
+                json.dumps(
+                    {
+                        "session": {"id": "same-session"},
+                        "archive": {"directory_name": d.name},
+                    }
+                )
+            )
         dupes = find_duplicates(archive_dir)
         assert len(dupes) == 1
         assert dupes[0][0] == "same-session"
@@ -684,10 +728,14 @@ class TestFindDuplicates:
         for sid in ["session-a", "session-b"]:
             d = archive_dir / f"2024-01-01-{sid}"
             d.mkdir()
-            (d / "session.meta.json").write_text(json.dumps({
-                "session": {"id": sid},
-                "archive": {"directory_name": d.name},
-            }))
+            (d / "session.meta.json").write_text(
+                json.dumps(
+                    {
+                        "session": {"id": sid},
+                        "archive": {"directory_name": d.name},
+                    }
+                )
+            )
         assert find_duplicates(archive_dir) == []
 
 
