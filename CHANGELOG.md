@@ -1,5 +1,16 @@
 # Changelog
 
+## transcript-archive 0.6.0
+
+`status` now lists the work it found, and generated archive files are pre-commit-clean on write.
+
+**Added:**
+- `status` plain-text output now lists every unarchived session id (with `substantial` / `trivial` classification) and every archived session id whose `needs_review` is true, each followed by the exact follow-up command. Counts remain the header. `--json` output is unchanged.
+- `archive.normalise_text_outputs(dir)` runs at the end of every `archive` and `regenerate` to strip trailing whitespace and collapse trailing newlines on `.md`, `.html`, `.json`, `.jsonl`, `.title`, and `.last_size` files. Matches `pre-commit-hooks` `trailing-whitespace` + `end-of-file-fixer` so in-tree archives (`target: here`) no longer bounce commits on every release.
+
+**Changed:**
+- `skills/transcript/SKILL.md` rewritten to describe every verb (what it does, what it prints, what it changes), with explicit "find unarchived" and "iterate needs-review" recipes pointing at `status` and `update`. Worktree coverage and the per-repo limit are now stated up front.
+
 ## transcript-archive 0.5.0
 
 Windows portability release. Closes the remaining locale- and line-ending-dependent gaps so Windows contributors (notably @adivea, who has been flagging and fixing these) can pull and run without local tweaks.
