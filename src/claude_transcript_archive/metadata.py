@@ -360,13 +360,23 @@ def is_ide_context_message(text: str) -> bool:
     if not text:
         return True
     text = text.strip()
-    # IDE context tags that shouldn't be used as titles
+    # IDE context tags and Claude Code automation envelopes that shouldn't be
+    # used as titles. <local-command-caveat>, <command-message>, <command-args>,
+    # <command-stdout>, <command-stderr> are emitted as the FIRST user message
+    # whenever a session opens with `! cmd`, a slash command, or any local
+    # shell-command invocation — without these, every such session generates
+    # the same boilerplate-derived title and collides on disk.
     ide_patterns = [
         r"^<ide_opened_file>",
         r"^<ide_selection>",
         r"^<ide_visible_files>",
         r"^<system-reminder>",
         r"^<command-name>",
+        r"^<command-message>",
+        r"^<command-args>",
+        r"^<command-stdout>",
+        r"^<command-stderr>",
+        r"^<local-command-caveat>",
     ]
     for pattern in ide_patterns:
         if re.match(pattern, text, re.IGNORECASE):
