@@ -536,10 +536,14 @@ def bulk(
             repo_root = Path.cwd()
         archive_dir = repo_root / ".ai-transcripts"
     else:
+        # target == "here" maps to local=True (mirrors _resolve_archive_dir);
+        # without this, `bulk` falls through to the global archive even when the
+        # project's defaults explicitly request local storage.
+        use_local = local or target == "here"
         archive_dir = _discovery.get_archive_dir(
-            local=local,
+            local=use_local,
             output=output,
-            project_dir=project_dir if not local else None,
+            project_dir=project_dir if not use_local else None,
         )
 
     manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}

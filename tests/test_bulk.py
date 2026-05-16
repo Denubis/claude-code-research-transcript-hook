@@ -93,3 +93,49 @@ class TestBulkCommand:
         result = runner.invoke(app, ["bulk", "--local"])
         assert result.exit_code == 0
         assert "Bulk archive complete" in result.output
+
+    def test_bulk_honours_target_here_default(self, temp_dir, monkeypatch):
+        """When defaults.target == 'here' and no CLI flag, bulk archives locally
+        (matches _resolve_archive_dir / status behaviour). Regression for the bug
+        where bulk silently wrote to the global archive while status reported a
+        local one."""
+        transcript = temp_dir / "session-xyz.jsonl"
+        transcript.write_text('{"type":"user","message":{"role":"user","content":"hi"}}\n')
+
+        local_archive = temp_dir / "ai_transcripts"
+        global_archive = temp_dir / "global_should_not_be_used"
+
+        captured: dict[str, object] = {}
+
+        def fake_get_archive_dir(*, local: bool, output: object, project_dir: object) -> object:
+            captured["local"] = local
+            captured["project_dir"] = project_dir
+            return local_archive if local else global_archive
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [temp_dir],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.discover_sessions",
+            lambda: [(transcript, "session-xyz")],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_project_dir_from_transcript",
+            lambda _p: temp_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {"target": "here"},
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_archive_dir",
+            fake_get_archive_dir,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["bulk"])
+        assert result.exit_code == 0, result.output
+        assert captured.get("local") is True, (
+            f"bulk should pass local=True when target=='here'; got {captured!r}"
+        )
