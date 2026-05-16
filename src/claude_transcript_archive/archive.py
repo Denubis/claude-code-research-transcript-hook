@@ -105,10 +105,82 @@ def log_error(message: str, quiet: bool = False):
         print(f"Error: {message}", file=sys.stderr)
 
 
+def log_warning(message: str, quiet: bool = False):
+    """Print warning message to stderr unless quiet mode.
+
+    Used for non-fatal events that the user should still see — directory-name
+    collisions resolved by auto-suffix, manifest-pointer protection refusals,
+    etc. Distinguished from log_error because the operation still succeeded.
+    """
+    if not quiet:
+        print(f"Warning: {message}", file=sys.stderr)
+
+
 def log_info(message: str, quiet: bool = False):
     """Print info message to stdout unless quiet mode."""
     if not quiet:
         print(message)
+
+
+def _dir_belongs_to_other_session(output_dir: Path, session_id: str) -> bool:
+    """Return True iff output_dir is already claimed by a different session.
+
+    Used by archive() to detect the silent-clobber case: distinct session UUIDs
+    whose title-derived directory names sanitise to the same slug (typically
+    because their first user messages are identical boilerplate envelopes).
+    A directory with no session.meta.json is treated as a collision too — it
+    might be a partially-written archive from a different session, and silently
+    sharing it would risk the same data-loss the named bug produced.
+    """
+    if not output_dir.exists():
+        return False
+    meta_path = output_dir / "session.meta.json"
+    if not meta_path.exists():
+        # Existing dir, no meta — could be partial write from another session.
+        # Conservatively treat as collision.
+        return True
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError):
+        return True
+    other_sid = meta.get("session", {}).get("id")
+    return bool(other_sid) and other_sid != session_id
+
+
+def _resolve_collision(
+    archive_dir: Path,
+    base_directory_name: str,
+    session_id: str,
+    quiet: bool,
+) -> tuple[str, Path]:
+    """Pick a directory name that doesn't collide with a different session.
+
+    If `base_directory_name` already belongs to a different session, append a
+    short hash of `session_id` (first 8 hex chars of the UUID, which is unique
+    enough at 4 billion entries) and emit a stderr warning naming both sides
+    so audits can find the event. Returns (final_directory_name, final_path).
+    """
+    base_path = archive_dir / base_directory_name
+    if not _dir_belongs_to_other_session(base_path, session_id):
+        return base_directory_name, base_path
+
+    suffix = session_id.split("-", 1)[0][:8] if "-" in session_id else session_id[:8]
+    suffixed_name = f"{base_directory_name}-{suffix}"
+    suffixed_path = archive_dir / suffixed_name
+
+    # If the suffixed name ALSO collides (astronomically unlikely with 8 hex
+    # chars, but possible if the same user re-suffixed twice), fall back to
+    # the full UUID. We don't loop forever — UUID is globally unique.
+    if _dir_belongs_to_other_session(suffixed_path, session_id):
+        suffixed_name = f"{base_directory_name}-{session_id}"
+        suffixed_path = archive_dir / suffixed_name
+
+    log_warning(
+        f"Directory-name collision: '{base_directory_name}' already belongs to "
+        f"a different session; using '{suffixed_name}' for session {session_id}",
+        quiet,
+    )
+    return suffixed_name, suffixed_path
 
 
 def update_metadata(
@@ -327,6 +399,40 @@ def archive(
     # Check if we already have a directory for this session
     existing_dir = manifest.get(session_id)
 
+    # Manifest-pointer protection: if a curated archive already exists for this
+    # session_id (non-empty Three Ps) and the incoming run does NOT supply its
+    # own Three Ps, refuse to regenerate the directory name and preserve the
+    # existing Three Ps in the rewritten metadata. Without this, a sweep-style
+    # bulk re-archive (or any --force from a hook) silently overwrites curated
+    # metadata with the auto-generated empty version — the failure mode the
+    # MELICA audit caught in 3 confirmed cases (66368cd6, 25bb361f, 986491f2).
+    _THREE_PS_KEYS = ("prompt_summary", "process_summary", "provenance_summary")
+    incoming_three_ps_empty = not three_ps or not any(
+        (three_ps or {}).get(k) for k in _THREE_PS_KEYS
+    )
+    if existing_dir and incoming_three_ps_empty:
+        existing_meta_path = Path(existing_dir) / "session.meta.json"
+        if existing_meta_path.exists():
+            try:
+                existing_meta = json.loads(existing_meta_path.read_text(encoding="utf-8"))
+                existing_tp = existing_meta.get("three_ps", {}) or {}
+                if any(existing_tp.get(k) for k in _THREE_PS_KEYS):
+                    if force or force_retitle:
+                        log_warning(
+                            f"Manifest-pointer protection: session {session_id} "
+                            f"already archived to '{Path(existing_dir).name}' with "
+                            "curated Three Ps; refusing to regenerate without new "
+                            "Three Ps (--force ignored). Pass --prompt/--process/"
+                            "--provenance to overwrite intentionally.",
+                            quiet,
+                        )
+                        force = False
+                        force_retitle = False
+                    # Preserve the curated Three Ps into the new metadata write.
+                    three_ps = {k: existing_tp.get(k, "") for k in _THREE_PS_KEYS}
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+
     if existing_dir and not force_retitle and not force:
         output_dir = Path(existing_dir)
         # Check if content changed
@@ -351,8 +457,16 @@ def archive(
     if not output_dir or force_retitle:
         safe_title = sanitize_filename(title)
         date_str = datetime.now().strftime("%Y-%m-%d")
-        directory_name = f"{date_str}-{safe_title or session_id[:8]}"
-        output_dir = archive_dir / directory_name
+        base_directory_name = f"{date_str}-{safe_title or session_id[:8]}"
+
+        # Silent-clobber guard: when distinct UUIDs sanitise to the same slug
+        # (e.g. all-boilerplate first messages), pick a UUID-suffixed name so
+        # each session keeps its own directory. Same-UUID re-archive falls
+        # through unchanged because _dir_belongs_to_other_session returns False
+        # when the existing meta matches our session_id.
+        directory_name, output_dir = _resolve_collision(
+            archive_dir, base_directory_name, session_id, quiet
+        )
 
         # If retitling, rename old directory
         if existing_dir and force_retitle and Path(existing_dir).exists():

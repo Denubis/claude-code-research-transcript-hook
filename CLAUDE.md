@@ -51,7 +51,7 @@ claude-research-transcript <subcommand> [OPTIONS]
 # Flags below apply to `archive`:
 --title TITLE          # Title for the transcript
 --retitle              # Force regenerate title/rename directory
---force                # Regenerate even if unchanged
+--force                # Regenerate even if unchanged (see below)
 --local                # Archive to ./ai_transcripts/
 --output DIR           # Custom output directory
 --quiet                # Suppress error messages
@@ -79,6 +79,13 @@ When `archive` runs with no stdin JSON and no `--transcript`/`--session-id`, it 
 - **Default (global):** `~/.claude/transcripts/{project-path}/`
 - **Local (`--local`):** `./ai_transcripts/`
 - **Custom (`--output`):** Any directory
+
+## Silent-Clobber Protection
+
+Two distinct mechanisms guard against the data-loss bug where multiple sessions landed in the same archive directory:
+
+- **Directory-collision auto-suffix.** When two distinct session UUIDs would sanitise to the same directory name (e.g. their first user messages are identical Claude Code boilerplate envelopes), the second session gets `-<first-8-uuid-chars>` appended. A `Warning:` line on stderr names both sides. Same-UUID re-archive still reuses its directory.
+- **Manifest-pointer protection.** When the manifest already points at an archive directory whose `session.meta.json` has non-empty Three Ps, and the incoming run supplies none, `archive()` refuses to repoint the manifest, ignores `--force`/`--retitle`, and preserves the curated Three Ps in the regenerated metadata. Pass `--prompt`/`--process`/`--provenance` to overwrite intentionally.
 
 ## IDW2025 Three Ps Framework
 
