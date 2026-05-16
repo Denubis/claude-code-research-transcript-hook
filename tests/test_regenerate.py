@@ -103,6 +103,53 @@ class TestRegenerateCommand:
         result = runner.invoke(app, ["regenerate"])
         assert result.exit_code == 1
 
+    def test_regenerate_output_is_whitespace_clean(self, temp_dir, monkeypatch):
+        """End-to-end guarantee: after regenerate, every text file in the
+        session dir has no trailing-whitespace and exactly one trailing newline.
+        Regression for the pre-commit ping-pong observed during stitched-archive
+        appends — the user's tooling repeatedly bounced commits because
+        regenerate left dirty HTML/MD on disk."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+        session_dir = _create_archive_with_raw(archive_dir, "clean-session")
+
+        # Plant deliberately dirty files that claude-code-transcripts might
+        # have produced, so normalise has actual work to do.
+        (session_dir / "index.html").write_text("<html>   \n<body>x</body>\n</html>")
+        (session_dir / "page-001.html").write_text("dirty   \n   \n")
+        (session_dir / ".title").write_text("Test Session   ")
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.cli.subprocess.run",
+            lambda _cmd, **_kw: type("R", (), {"stdout": str(temp_dir), "returncode": 0})(),
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {"target": "branch"},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["regenerate", "--session-id", "clean-session"])
+        assert result.exit_code == 0
+
+        # Walk every text-ish file in the archive dir and prove cleanliness.
+        suffixes_to_check = {".html", ".md", ".json", ".jsonl", ".txt"}
+        names_to_check = {".title", ".last_size"}
+        for path in session_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix not in suffixes_to_check and path.name not in names_to_check:
+                continue
+            content = path.read_text(encoding="utf-8")
+            if not content:
+                continue
+            assert content.endswith("\n"), f"{path.name} missing EOF newline"
+            assert not content.endswith("\n\n"), f"{path.name} has multiple EOF newlines"
+            for n, line in enumerate(content.splitlines(), 1):
+                assert line == line.rstrip(), (
+                    f"{path.name}:{n} has trailing whitespace: {line!r}"
+                )
+
     def test_regenerate_all(self, temp_dir, monkeypatch):
         archive_dir = temp_dir / ".ai-transcripts"
         archive_dir.mkdir()

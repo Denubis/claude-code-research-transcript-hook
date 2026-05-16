@@ -229,7 +229,11 @@ def update_metadata(
     ):
         meta.setdefault("archive", {})["needs_review"] = False
 
-    sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    # Match the rules pre-commit-hooks enforce: trailing newline, no trailing
+    # whitespace. Without this, `update` runs in an in-tree archive bounce on
+    # every commit even though the rest of the pipeline already normalises.
+    sidecar_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    normalise_text_outputs(session_dir)
     return True
 
 
