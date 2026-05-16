@@ -355,6 +355,31 @@ def find_plan_files(_transcript_path: Path) -> list[Path]:
     return list(plans_dir.glob("*.md"))
 
 
+def extract_custom_title(content: str, max_lines: int = 100) -> str | None:
+    """Read the first non-empty `customTitle` field from a JSONL stream.
+
+    Claude Code writes `customTitle` on every entry once the session has been
+    named (typically via `/exec-session-naming`). Two sessions sharing this
+    string in the same project belong to one logical conversation; this is the
+    auto-stitch detection signal. Scans the first `max_lines` entries because
+    the field, once set, appears from the head of the file onwards. Returns
+    None when the field is absent, empty, or the stream is malformed.
+    """
+    for i, line in enumerate(content.split("\n")):
+        if i >= max_lines:
+            break
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        title = entry.get("customTitle")
+        if title:
+            return title
+    return None
+
+
 def is_ide_context_message(text: str) -> bool:
     """Check if a message is just IDE context, not a real user request."""
     if not text:

@@ -305,6 +305,101 @@ class TestIsIdeContextMessage:
 
 
 # =============================================================================
+# Test extract_custom_title (auto-stitch detection signal)
+# =============================================================================
+
+
+class TestExtractCustomTitle:
+    """Auto-stitch's detection signal. Claude Code writes `customTitle` on every
+    JSONL entry once the session has been named (typically via
+    `/exec-session-naming`). Two sessions sharing this string in the same
+    project belong to one logical conversation."""
+
+    def test_returns_string_when_present(self):
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        content = "\n".join(
+            [
+                json.dumps({"type": "custom-title", "customTitle": "Adela/mel:plan-dvc"}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "abc",
+                        "customTitle": "Adela/mel:plan-dvc",
+                        "message": {"role": "user", "content": "hi"},
+                    }
+                ),
+            ]
+        )
+        assert extract_custom_title(content) == "Adela/mel:plan-dvc"
+
+    def test_returns_none_when_missing(self):
+        """Sessions predating the customTitle convention (or runs without
+        /exec-session-naming) have no customTitle field. Must return None so
+        auto-stitch treats them as singletons."""
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        content = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "abc",
+                        "message": {"role": "user", "content": "hi"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "abc",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ),
+            ]
+        )
+        assert extract_custom_title(content) is None
+
+    def test_returns_none_for_empty_string(self):
+        """An empty customTitle is semantically 'unset' — must not cluster."""
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        content = json.dumps({"type": "user", "customTitle": "", "sessionId": "abc"})
+        assert extract_custom_title(content) is None
+
+    def test_handles_empty_content(self):
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        assert extract_custom_title("") is None
+
+    def test_handles_malformed_jsonl(self):
+        """Robustness: a single malformed line must not stop us from finding
+        the customTitle in subsequent valid lines."""
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        content = "\n".join(
+            [
+                "not valid json {",
+                json.dumps({"type": "user", "customTitle": "valid-after-junk"}),
+            ]
+        )
+        assert extract_custom_title(content) == "valid-after-junk"
+
+    def test_returns_first_customtitle_found(self):
+        """When customTitle changes mid-session (rare but possible), use the
+        first one. Stability across the session is the contract; mid-session
+        renames are an edge case we don't optimise for."""
+        from claude_transcript_archive.metadata import extract_custom_title
+
+        content = "\n".join(
+            [
+                json.dumps({"type": "user", "customTitle": "first"}),
+                json.dumps({"type": "user", "customTitle": "second"}),
+            ]
+        )
+        assert extract_custom_title(content) == "first"
+
+
+# =============================================================================
 # Test find_plan_files
 # =============================================================================
 
