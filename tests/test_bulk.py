@@ -139,3 +139,91 @@ class TestBulkCommand:
         assert captured.get("local") is True, (
             f"bulk should pass local=True when target=='here'; got {captured!r}"
         )
+
+
+class TestBulkClustersDispatch:
+    """Phase 2: bulk groups unarchived sessions by (project, customTitle) and
+    dispatches singletons to archive() while multi-session clusters trip a
+    Phase-3 NotImplementedError stub."""
+
+    @staticmethod
+    def _write_session_jsonl(path: Path, custom_title: str | None) -> None:
+        entry: dict = {
+            "type": "user",
+            "message": {"role": "user", "content": "hi"},
+        }
+        if custom_title is not None:
+            entry["customTitle"] = custom_title
+        path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    def test_cluster_of_two_raises_notimplemented(self, temp_dir, monkeypatch):
+        """Phase 2: a cluster of ≥2 same-customTitle sessions raises
+        NotImplementedError naming stitch_cluster — Phase 3 wires this up."""
+        a = temp_dir / "uuid-aaa.jsonl"
+        b = temp_dir / "uuid-bbb.jsonl"
+        self._write_session_jsonl(a, "shared-feat")
+        self._write_session_jsonl(b, "shared-feat")
+
+        archive_dir = temp_dir / "ai_transcripts"
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [temp_dir],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.discover_sessions",
+            lambda: [(a, "uuid-aaa"), (b, "uuid-bbb")],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_project_dir_from_transcript",
+            lambda _p: temp_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {},
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_archive_dir",
+            lambda **_kw: archive_dir,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["bulk", "--local"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, NotImplementedError)
+        assert "stitch_cluster" in str(result.exception)
+        assert "Phase 3" in str(result.exception)
+
+    def test_singletons_still_archive_normally(self, temp_dir, monkeypatch):
+        """Phase 2: sessions with distinct customTitles cluster as singletons
+        and still flow through the existing archive() path — no regression."""
+        a = temp_dir / "uuid-aaa.jsonl"
+        b = temp_dir / "uuid-bbb.jsonl"
+        self._write_session_jsonl(a, "feat-x")
+        self._write_session_jsonl(b, "feat-y")
+
+        archive_dir = temp_dir / "ai_transcripts"
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [temp_dir],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.discover_sessions",
+            lambda: [(a, "uuid-aaa"), (b, "uuid-bbb")],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_project_dir_from_transcript",
+            lambda _p: temp_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {},
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_archive_dir",
+            lambda **_kw: archive_dir,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["bulk", "--local"])
+        assert result.exit_code == 0, result.output
+        assert "Bulk archive complete" in result.output

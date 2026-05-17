@@ -9,6 +9,7 @@ import pytest
 from claude_transcript_archive.discovery import (
     _encode_cc_path,
     auto_discover_transcript,
+    discover_clusters,
     discover_sessions,
     get_archive_dir,
     get_candidate_project_dirs,
@@ -630,3 +631,122 @@ class TestLoadProjectDefaults:
         captured = capsys.readouterr()
         assert "tags" in captured.err
         assert "purpose" in captured.err
+
+
+# =============================================================================
+# Test discover_clusters (auto-stitch Phase 2)
+# =============================================================================
+
+
+class TestDiscoverClusters:
+    """Group sessions by (project, customTitle) for auto-stitch dispatch."""
+
+    @staticmethod
+    def _write_jsonl(path: Path, custom_title: str | None) -> None:
+        entry: dict = {"type": "user", "message": {"role": "user", "content": "hi"}}
+        if custom_title is not None:
+            entry["customTitle"] = custom_title
+        path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    def test_ac1_1_same_customtitle_one_project_clusters(self, temp_dir):
+        """auto-stitch.AC1.1: two same-customTitle sessions → one cluster of size 2."""
+        project_slug = temp_dir / "-home-user-proj"
+        project_slug.mkdir()
+        a = project_slug / "uuid-aaa.jsonl"
+        b = project_slug / "uuid-bbb.jsonl"
+        self._write_jsonl(a, "feature-x")
+        self._write_jsonl(b, "feature-x")
+
+        clusters = discover_clusters([(a, "uuid-aaa"), (b, "uuid-bbb")])
+        cluster_values = list(clusters.values())
+        assert len(cluster_values) == 1
+        members = cluster_values[0]
+        assert len(members) == 2
+        assert sorted(sid for _, sid in members) == ["uuid-aaa", "uuid-bbb"]
+
+    def test_ac1_2_three_session_cluster(self, temp_dir):
+        """auto-stitch.AC1.2: three same-customTitle sessions → one cluster of size 3."""
+        project_slug = temp_dir / "-home-user-proj"
+        project_slug.mkdir()
+        a = project_slug / "uuid-aaa.jsonl"
+        b = project_slug / "uuid-bbb.jsonl"
+        c = project_slug / "uuid-ccc.jsonl"
+        for path in (a, b, c):
+            self._write_jsonl(path, "long-arc")
+
+        clusters = discover_clusters(
+            [(a, "uuid-aaa"), (b, "uuid-bbb"), (c, "uuid-ccc")]
+        )
+        assert len(clusters) == 1
+        members = next(iter(clusters.values()))
+        assert sorted(sid for _, sid in members) == ["uuid-aaa", "uuid-bbb", "uuid-ccc"]
+
+    def test_ac1_3_no_customtitle_each_singleton(self, temp_dir):
+        """auto-stitch.AC1.3: sessions with no customTitle remain in separate singleton keys."""
+        project_slug = temp_dir / "-home-user-proj"
+        project_slug.mkdir()
+        a = project_slug / "uuid-aaa.jsonl"
+        b = project_slug / "uuid-bbb.jsonl"
+        self._write_jsonl(a, None)
+        self._write_jsonl(b, None)
+
+        clusters = discover_clusters([(a, "uuid-aaa"), (b, "uuid-bbb")])
+        assert len(clusters) == 2
+        for members in clusters.values():
+            assert len(members) == 1
+
+    def test_ac1_4_different_customtitle_separate_clusters(self, temp_dir):
+        """auto-stitch.AC1.4: different customTitle strings → separate clusters."""
+        project_slug = temp_dir / "-home-user-proj"
+        project_slug.mkdir()
+        a = project_slug / "uuid-aaa.jsonl"
+        b = project_slug / "uuid-bbb.jsonl"
+        self._write_jsonl(a, "feature-x")
+        self._write_jsonl(b, "feature-y")
+
+        clusters = discover_clusters([(a, "uuid-aaa"), (b, "uuid-bbb")])
+        assert len(clusters) == 2
+        for members in clusters.values():
+            assert len(members) == 1
+
+    def test_ac1_5_same_customtitle_different_projects_separate(self, temp_dir):
+        """auto-stitch.AC1.5: same customTitle in different projects → separate clusters.
+
+        The project discriminator is the encoded slug directory (transcript_path.parent),
+        so two different slug parents must never collapse into one cluster.
+        """
+        project_a = temp_dir / "-home-user-proj-a"
+        project_b = temp_dir / "-home-user-proj-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        a = project_a / "uuid-aaa.jsonl"
+        b = project_b / "uuid-bbb.jsonl"
+        self._write_jsonl(a, "feature-x")
+        self._write_jsonl(b, "feature-x")
+
+        clusters = discover_clusters([(a, "uuid-aaa"), (b, "uuid-bbb")])
+        assert len(clusters) == 2
+        for members in clusters.values():
+            assert len(members) == 1
+
+    def test_empty_input_returns_empty_dict(self):
+        """No sessions → empty clusters dict, not an error."""
+        assert discover_clusters([]) == {}
+
+    def test_empty_customtitle_treated_as_missing(self, temp_dir):
+        """Empty-string customTitle is treated the same as no customTitle (singleton).
+
+        extract_custom_title returns None for falsy values; discover_clusters must
+        not collapse all empty-titled sessions into one bogus cluster.
+        """
+        project_slug = temp_dir / "-home-user-proj"
+        project_slug.mkdir()
+        a = project_slug / "uuid-aaa.jsonl"
+        b = project_slug / "uuid-bbb.jsonl"
+        self._write_jsonl(a, "")
+        self._write_jsonl(b, "")
+
+        clusters = discover_clusters([(a, "uuid-aaa"), (b, "uuid-bbb")])
+        assert len(clusters) == 2
+        for members in clusters.values():
+            assert len(members) == 1

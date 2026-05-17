@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from claude_transcript_archive.metadata import extract_custom_title
+
 
 def resolve_worktrees() -> list[Path]:
     """Discover all git worktrees for the current repository.
@@ -87,6 +89,41 @@ def discover_sessions() -> list[tuple[Path, str]]:
             if session_id not in seen:
                 seen[session_id] = jsonl_file
     return [(path, sid) for sid, path in seen.items()]
+
+
+def discover_clusters(
+    sessions: list[tuple[Path, str]],
+) -> dict[str, list[tuple[Path, str]]]:
+    """Group sessions by (project, customTitle) for auto-stitch dispatch.
+
+    Returns a dict keyed by 'project_slug||customTitle' whose values are lists
+    of (transcript_path, session_id) tuples for that cluster. Sessions without
+    a customTitle, or whose customTitle is empty, get keys of the form
+    'project_slug||__singleton__:<session_id>' so each becomes its own cluster
+    of size 1. Caller distinguishes 'should-stitch' from 'leave-as-singleton'
+    by checking len(value) >= 2.
+
+    The project_slug component is str(transcript_path.parent) — the absolute
+    path of the Claude Code encoded project directory under
+    ~/.claude/projects/. Using the parent directly avoids the fragility of
+    get_project_dir_from_transcript() (which can return None when the source
+    project no longer exists on disk, e.g. archives imported from another
+    machine) while still giving a stable per-project discriminator.
+    """
+    clusters: dict[str, list[tuple[Path, str]]] = {}
+    for transcript_path, session_id in sessions:
+        project_key = str(transcript_path.parent)
+        try:
+            content = transcript_path.read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+        title = extract_custom_title(content)
+        if title:
+            key = f"{project_key}||{title}"
+        else:
+            key = f"{project_key}||__singleton__:{session_id}"
+        clusters.setdefault(key, []).append((transcript_path, session_id))
+    return clusters
 
 
 def get_archive_dir(local: bool, output: str | None, project_dir: Path | None = None) -> Path:

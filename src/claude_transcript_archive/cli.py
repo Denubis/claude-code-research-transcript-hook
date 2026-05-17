@@ -559,7 +559,17 @@ def bulk(
     archived_count = 0
     trivial_count = 0
 
-    for transcript_path, session_id in unarchived:
+    # auto-stitch Phase 2: group by (project, customTitle); singletons take the
+    # existing archive() path, multi-session clusters trip a Phase-3 stub.
+    # Phase 3 will replace the raise with a call to stitch_cluster().
+    clusters = _discovery.discover_clusters(unarchived)
+
+    for members in clusters.values():
+        if len(members) >= 2:
+            msg = "stitch_cluster (Phase 3) not yet implemented"
+            raise NotImplementedError(msg)
+
+        transcript_path, session_id = members[0]
         content = transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
         classification = _metadata.classify_session(content)
 
