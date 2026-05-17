@@ -860,7 +860,27 @@ def stitch(
         raise typer.Exit(code=1)
 
     if not quiet:
-        typer.echo(f"Stitched to: {result}")
+        # Contextual summary — don't claim "Stitched to:" when every source
+        # was an idempotent no-op (the MELICA self-stitch case).
+        if result.attached > 0:
+            summary = (
+                f"Stitched {result.attached} attached, "
+                f"{result.skipped} skipped, {result.failed} failed "
+                f"into: {result.directory}"
+            )
+        elif result.failed > 0 and result.skipped == 0:
+            summary = (
+                f"No sources attached — {result.failed} failed. "
+                f"Target: {result.directory}"
+            )
+        elif result.skipped > 0:
+            summary = (
+                f"No changes — all {result.skipped} source(s) already "
+                f"represent {result.directory.name}"
+            )
+        else:
+            summary = f"No sources processed. Target: {result.directory}"
+        typer.echo(summary)
 
 
 @app.command()

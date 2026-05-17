@@ -308,3 +308,87 @@ class TestCLIStitch:
         assert result.returncode != 0
         assert "no-such-uuid" in result.stderr
         assert "no archive" in result.stderr.lower()
+
+    def test_stitch_self_stitch_says_no_changes_not_stitched_to(self, temp_dir):
+        """Polish: stitch --into X X (target == source, the MELICA degenerate
+        case) is a true on-disk no-op. The CLI must NOT say 'Stitched to:'
+        because that misleads the user into thinking something changed."""
+        self._archive_singleton(temp_dir, "uuid-solo", "x")
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "uuid-solo", "uuid-solo", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert result.returncode == 0
+        assert "Stitched to:" not in result.stdout, (
+            f"misleading 'Stitched to:' on no-op stitch; stdout={result.stdout!r}"
+        )
+        assert "no changes" in result.stdout.lower() or (
+            "already" in result.stdout.lower()
+        ), f"expected no-change message; stdout={result.stdout!r}"
+
+    def test_stitch_attached_says_count(self, temp_dir):
+        """Polish: when stitch actually attaches sources, the CLI reports the
+        number attached so the user can confirm something happened."""
+        self._archive_singleton(temp_dir, "uuid-target", "alpha")
+        self._archive_singleton(temp_dir, "uuid-source", "beta")
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "uuid-target", "uuid-source", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert result.returncode == 0, (
+            f"stitch failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        # Says how many were attached and gives the path.
+        assert "Stitched" in result.stdout
+        assert "1" in result.stdout  # 1 source attached
+        # The path of the cluster is reported.
+        archive_dir = temp_dir / "ai_transcripts"
+        cluster_dirs = [
+            d for d in archive_dir.iterdir()
+            if d.is_dir() and d.name.endswith("-stitched")
+        ]
+        assert len(cluster_dirs) == 1
+        assert str(cluster_dirs[0]) in result.stdout
+
+    def test_stitch_mixed_attached_and_skipped_reports_both(self, temp_dir):
+        """When a stitch call mixes new sources with already-constituent
+        sources, the CLI surfaces both counts."""
+        # Build a 2-member cluster via the manual stitch path.
+        self._archive_singleton(temp_dir, "uuid-target", "alpha")
+        self._archive_singleton(temp_dir, "uuid-first", "beta")
+        first_stitch = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "uuid-target", "uuid-first", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert first_stitch.returncode == 0
+
+        # Archive a third singleton.
+        self._archive_singleton(temp_dir, "uuid-second", "gamma")
+
+        # Now: re-stitch first (already constituent) + second (new).
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "uuid-target",
+                "uuid-first", "uuid-second", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert result.returncode == 0
+        # Should mention both: 1 attached, 1 skipped.
+        out = result.stdout.lower()
+        assert "1 attached" in out or "attached: 1" in out, (
+            f"expected attached count; stdout={result.stdout!r}"
+        )
+        assert "1 skipped" in out or "skipped: 1" in out or "already" in out, (
+            f"expected skipped/already note; stdout={result.stdout!r}"
+        )
