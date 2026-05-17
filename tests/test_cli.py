@@ -4,6 +4,7 @@ import importlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from claude_transcript_archive import archive, catalog, discovery, metadata, output
 
@@ -222,3 +223,88 @@ class TestCLIIntegration:
         assert custom_output.exists()
         session_dirs = list(custom_output.glob("*-*"))
         assert len(session_dirs) == 1
+
+
+class TestCLIStitch:
+    """Integration tests for the manual `stitch` verb (Phase 5)."""
+
+    def _archive_singleton(self, temp_dir, session_id: str, marker: str) -> Path:
+        """Archive a single session via the CLI in --local mode, return its dir."""
+        transcript = temp_dir / f"{session_id}.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-04-24T10:00:00Z",
+                    "message": {"role": "user", "content": f"prompt: {marker}"},
+                }
+            )
+            + "\n"
+        )
+        subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "archive", "--transcript", str(transcript),
+                "--session-id", session_id, "--local", "--quiet",
+            ],
+            capture_output=True, text=True, check=True, cwd=str(temp_dir),
+        )
+        archive_dir = temp_dir / "ai_transcripts"
+        manifest = json.loads(
+            (archive_dir / ".session_manifest.json").read_text(encoding="utf-8")
+        )
+        return Path(manifest[session_id])
+
+    def test_stitch_help(self):
+        """`stitch --help` runs and documents the verb."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_transcript_archive.cli", "stitch", "--help"],
+            capture_output=True, text=True, check=False,
+        )
+        assert result.returncode == 0
+        assert "--into" in result.stdout
+
+    def test_stitch_folds_singleton_into_singleton(self, temp_dir):
+        """End-to-end: archive two singletons (no shared customTitle so
+        auto-stitch does NOT fire), then stitch second into first via CLI.
+        Result: one cluster, both UUIDs as constituents, old second dir gone."""
+        dir_a = self._archive_singleton(temp_dir, "uuid-aaa", "alpha")
+        dir_b = self._archive_singleton(temp_dir, "uuid-bbb", "beta")
+        assert dir_a.exists() and dir_b.exists()
+
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "uuid-aaa", "uuid-bbb", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert result.returncode == 0, (
+            f"stitch failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        archive_dir = temp_dir / "ai_transcripts"
+        manifest = json.loads(
+            (archive_dir / ".session_manifest.json").read_text(encoding="utf-8")
+        )
+        cluster_dir = Path(manifest["uuid-aaa"])
+        assert cluster_dir.name.endswith("-stitched")
+        assert manifest["uuid-bbb"] == str(cluster_dir)
+        # uuid-bbb's old singleton dir is gone — content folded into the cluster.
+        assert not dir_b.exists()
+
+    def test_stitch_missing_target_exits_nonzero(self, temp_dir):
+        """AC5.3: target_uuid not in manifest → exit 1 with named error."""
+        # Seed a known UUID so archive_dir exists.
+        self._archive_singleton(temp_dir, "uuid-known", "x")
+
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "claude_transcript_archive.cli",
+                "stitch", "--into", "no-such-uuid", "uuid-known", "--local",
+            ],
+            capture_output=True, text=True, check=False, cwd=str(temp_dir),
+        )
+        assert result.returncode != 0
+        assert "no-such-uuid" in result.stderr
+        assert "no archive" in result.stderr.lower()

@@ -539,6 +539,129 @@ def stitch_cluster(
     return output_dir
 
 
+def stitch_sessions(
+    target_uuid: str,
+    source_specs: list[tuple[str, Path]],
+    archive_dir: Path,
+    *,
+    quiet: bool = False,
+) -> Path | None:
+    """Force-stitch ``source_specs`` into the archive identified by
+    ``target_uuid`` (Phase 5, AC5.1-AC5.4).
+
+    Dispatches to ``extend_cluster`` when the target is already a cluster, or
+    to ``promote_singleton_to_cluster`` when the target is a singleton. This
+    is the manual-override path for cases the customTitle-driven auto-stitch
+    cannot cover — pre-customTitle legacy sessions like MELICA's dad509ba
+    being the canonical example (DR4).
+
+    Each source is an explicit ``(uuid, jsonl_path)`` pair. When a source was
+    itself an existing singleton in the archive, its old directory is removed
+    after a successful attach and its catalog entry pruned — its content now
+    lives in the target's concatenated stream.
+
+    Idempotent per AC5.4: a source UUID already present in the target's
+    ``_constituent_sessions`` is skipped with a stdout note; subsequent
+    sources in the same call still process. Returns ``None`` only on the
+    AC5.3 failure (``target_uuid`` not in manifest); a stdout error names the
+    missing UUID. Returns the target's final directory on success — that path
+    may differ from the initial lookup because the first source's promotion
+    renames the singleton dir.
+    """
+    manifest = _catalog.load_manifest(archive_dir)
+    if target_uuid not in manifest:
+        log_error(f"stitch: no archive found for {target_uuid}", quiet)
+        return None
+    target_dir = Path(manifest[target_uuid])
+
+    for source_uuid, source_jsonl in source_specs:
+        # Re-read each iteration — promotion on the first source moves the
+        # target directory, so the manifest is the source of truth.
+        manifest = _catalog.load_manifest(archive_dir)
+        target_dir = Path(manifest.get(target_uuid, str(target_dir)))
+
+        meta_path = target_dir / "session.meta.json"
+        is_cluster = False
+        constituents: list[dict] = []
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                is_cluster = bool(meta.get("archive", {}).get("stitched"))
+                constituents = meta.get("_constituent_sessions", []) or []
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+
+        if any(c.get("id") == source_uuid for c in constituents):
+            log_info(
+                f"stitch: {source_uuid} already in cluster {target_dir.name} — "
+                "no-op.",
+                quiet,
+            )
+            continue
+
+        # Capture source's old archive dir BEFORE dispatch — extend/promote
+        # both update the manifest to point source_uuid at the target dir.
+        source_old_dir: Path | None = None
+        if source_uuid in manifest:
+            candidate = Path(manifest[source_uuid])
+            if candidate != target_dir:
+                source_old_dir = candidate
+
+        if is_cluster:
+            result = extend_cluster(
+                target_dir, source_uuid, source_jsonl, quiet=quiet,
+            )
+        else:
+            result = promote_singleton_to_cluster(
+                target_dir, source_uuid, source_jsonl, quiet=quiet,
+            )
+
+        if result is None:
+            log_warning(
+                f"stitch: failed to attach {source_uuid} to {target_dir.name}",
+                quiet,
+            )
+            continue
+
+        # Promotion renames target_dir — track the new location for the next
+        # iteration via the manifest re-read at the top of the loop.
+        target_dir = result
+
+        if source_old_dir is not None and source_old_dir.exists():
+            try:
+                shutil.rmtree(source_old_dir)
+                log_info(
+                    f"stitch: removed orphan singleton dir "
+                    f"{source_old_dir.name} (content now in {target_dir.name})",
+                    quiet,
+                )
+            except OSError as exc:
+                log_warning(
+                    f"stitch: could not remove orphan {source_old_dir}: {exc}",
+                    quiet,
+                )
+            # Prune the orphan source entry from the catalog. update_catalog
+            # writes entries keyed under ``id``; rebuild_indexes writes
+            # ``session_id``. Match either to handle both lineages.
+            try:
+                catalog_data = _catalog.load_catalog(archive_dir)
+                catalog_data["sessions"] = [
+                    s for s in catalog_data["sessions"]
+                    if s.get("id") != source_uuid
+                    and s.get("session_id") != source_uuid
+                ]
+                _catalog.save_catalog(archive_dir, catalog_data)
+            except (OSError, KeyError) as exc:
+                log_warning(
+                    f"stitch: catalog prune failed for {source_uuid}: {exc}",
+                    quiet,
+                )
+
+    # Final lookup — promotion-aware.
+    manifest = _catalog.load_manifest(archive_dir)
+    return Path(manifest.get(target_uuid, str(target_dir)))
+
+
 def _find_matching_cluster_or_singleton(
     archive_dir: Path,
     custom_title: str,

@@ -22,6 +22,7 @@ from claude_transcript_archive.archive import (
     extend_cluster,
     promote_singleton_to_cluster,
     stitch_cluster,
+    stitch_sessions,
 )
 
 
@@ -787,3 +788,238 @@ class TestArchivePromotionPath:
             meta_after["_constituent_sessions"]
             == meta_before["_constituent_sessions"]
         )
+
+
+# =============================================================================
+# Phase 5 — manual stitch CLI for edge cases (AC5.1–AC5.4). The CLI verb is
+# tested separately in tests/test_cli.py; here we exercise the orchestration
+# function stitch_sessions() that the CLI verb delegates to.
+# =============================================================================
+
+
+def _archive_singleton(
+    temp_dir: Path,
+    archive_dir: Path,
+    session_id: str,
+    custom_title: str | None,
+    started_at: str,
+    ended_at: str,
+) -> Path:
+    """Helper: archive a single session and return its archive dir."""
+    transcript = _new_session_jsonl(
+        temp_dir, session_id, custom_title, started_at, ended_at,
+        user_messages=2, assistant_messages=3,
+    )
+    result = archive(
+        session_id=session_id,
+        transcript_path=transcript,
+        archive_dir=archive_dir,
+        quiet=True,
+    )
+    assert result is not None
+    return result
+
+
+class TestStitchSessions:
+    """auto-stitch.AC5 — manual stitch orchestration."""
+
+    def test_ac5_1_extend_existing_cluster_with_new_source(self, temp_dir):
+        """AC5.1: stitch_sessions on an existing cluster adds the source as a
+        new constituent and fans the manifest."""
+        archive_dir = temp_dir / "archives"
+        # Build a 2-member cluster via auto-stitch.
+        ta = _new_session_jsonl(temp_dir, "uuid-a", "feat-x",
+                                 "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z")
+        tb = _new_session_jsonl(temp_dir, "uuid-b", "feat-x",
+                                 "2026-05-01T10:00:00Z", "2026-05-01T11:00:00Z")
+        archive(session_id="uuid-a", transcript_path=ta,
+                archive_dir=archive_dir, quiet=True)
+        cluster_dir = archive(session_id="uuid-b", transcript_path=tb,
+                              archive_dir=archive_dir, quiet=True)
+
+        # A brand-new source that does NOT share customTitle — the manual stitch
+        # CLI ignores customTitle (DR4); we attach by force.
+        new_path = _new_session_jsonl(
+            temp_dir, "uuid-z", "different-title",
+            "2026-05-16T10:00:00Z", "2026-05-16T11:00:00Z",
+        )
+        result = stitch_sessions(
+            target_uuid="uuid-a",  # any constituent UUID resolves to the cluster
+            source_specs=[("uuid-z", new_path)],
+            archive_dir=archive_dir,
+            quiet=True,
+        )
+
+        assert result == cluster_dir
+        meta = json.loads((cluster_dir / "session.meta.json").read_text(encoding="utf-8"))
+        ids = [c["id"] for c in meta["_constituent_sessions"]]
+        assert "uuid-z" in ids
+        manifest = _catalog.load_manifest(archive_dir)
+        assert manifest["uuid-z"] == str(cluster_dir)
+
+    def test_ac5_2_promote_singleton_target_then_extend(self, temp_dir):
+        """AC5.2: stitch_sessions on a singleton target promotes it to a
+        cluster as part of the operation."""
+        archive_dir = temp_dir / "archives"
+        singleton_dir = _archive_singleton(
+            temp_dir, archive_dir, "uuid-solo", "feat-solo",
+            "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z",
+        )
+
+        new_path = _new_session_jsonl(
+            temp_dir, "uuid-new", None,
+            "2026-05-16T10:00:00Z", "2026-05-16T11:00:00Z",
+        )
+        result = stitch_sessions(
+            target_uuid="uuid-solo",
+            source_specs=[("uuid-new", new_path)],
+            archive_dir=archive_dir,
+            quiet=True,
+        )
+
+        assert result is not None
+        assert result.name.endswith("-stitched"), (
+            f"target should have been promoted to cluster; got {result.name}"
+        )
+        # Old singleton dir no longer exists (renamed).
+        assert not singleton_dir.exists() or singleton_dir == result
+        manifest = _catalog.load_manifest(archive_dir)
+        assert manifest["uuid-solo"] == str(result)
+        assert manifest["uuid-new"] == str(result)
+
+    def test_ac5_2_fold_existing_singleton_into_cluster(self, temp_dir):
+        """AC5.2 alt scenario: source UUID is itself an existing singleton.
+        Stitch must fold its content into the target cluster and remove the
+        orphaned singleton dir. Models the MELICA dad509ba case — a legacy
+        singleton attached to an auto-stitched cluster."""
+        archive_dir = temp_dir / "archives"
+        # Build a cluster of 2 via auto-stitch (different customTitle from below).
+        ta = _new_session_jsonl(temp_dir, "uuid-cluster-a", "feat-cluster",
+                                 "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z")
+        tb = _new_session_jsonl(temp_dir, "uuid-cluster-b", "feat-cluster",
+                                 "2026-05-01T10:00:00Z", "2026-05-01T11:00:00Z")
+        archive(session_id="uuid-cluster-a", transcript_path=ta,
+                archive_dir=archive_dir, quiet=True)
+        cluster_dir = archive(session_id="uuid-cluster-b", transcript_path=tb,
+                              archive_dir=archive_dir, quiet=True)
+
+        # Independent singleton (legacy, no customTitle).
+        legacy_singleton_dir = _archive_singleton(
+            temp_dir, archive_dir, "uuid-legacy", None,
+            "2026-04-20T10:00:00Z", "2026-04-20T11:00:00Z",
+        )
+        assert legacy_singleton_dir.exists()
+
+        # Stitch legacy into cluster.
+        result = stitch_sessions(
+            target_uuid="uuid-cluster-a",
+            source_specs=[
+                ("uuid-legacy", legacy_singleton_dir / "raw-transcript.jsonl"),
+            ],
+            archive_dir=archive_dir,
+            quiet=True,
+        )
+        assert result == cluster_dir
+
+        # Cluster has all three constituents.
+        meta = json.loads((cluster_dir / "session.meta.json").read_text(encoding="utf-8"))
+        ids = [c["id"] for c in meta["_constituent_sessions"]]
+        assert set(ids) == {"uuid-cluster-a", "uuid-cluster-b", "uuid-legacy"}
+
+        # Old legacy singleton dir is gone.
+        assert not legacy_singleton_dir.exists(), (
+            "stitched-away singleton dir must be cleaned up"
+        )
+
+        # Manifest fans legacy to the cluster, not its old dir.
+        manifest = _catalog.load_manifest(archive_dir)
+        assert manifest["uuid-legacy"] == str(cluster_dir)
+
+    def test_ac5_3_missing_target_returns_none_and_errors(self, temp_dir, capsys):
+        archive_dir = temp_dir / "archives"
+        # Seed something so archive_dir exists but the target UUID isn't there.
+        _archive_singleton(temp_dir, archive_dir, "uuid-known", "anything",
+                            "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z")
+        new_path = _new_session_jsonl(
+            temp_dir, "uuid-source", None,
+            "2026-05-01T10:00:00Z", "2026-05-01T11:00:00Z",
+        )
+
+        capsys.readouterr()  # discard noise from seeding
+        result = stitch_sessions(
+            target_uuid="nonexistent-uuid",
+            source_specs=[("uuid-source", new_path)],
+            archive_dir=archive_dir,
+            quiet=False,
+        )
+        assert result is None
+        captured = capsys.readouterr()
+        assert "no archive found" in captured.err.lower()
+        assert "nonexistent-uuid" in captured.err
+
+    def test_ac5_4_already_constituent_source_is_noop(self, temp_dir, capsys):
+        """AC5.4: attempting to stitch a UUID that's already a constituent
+        of the target cluster is a no-op (warns, but does not error or
+        duplicate the entry)."""
+        archive_dir = temp_dir / "archives"
+        ta = _new_session_jsonl(temp_dir, "uuid-a", "feat-x",
+                                 "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z")
+        tb = _new_session_jsonl(temp_dir, "uuid-b", "feat-x",
+                                 "2026-05-01T10:00:00Z", "2026-05-01T11:00:00Z")
+        archive(session_id="uuid-a", transcript_path=ta,
+                archive_dir=archive_dir, quiet=True)
+        cluster_dir = archive(session_id="uuid-b", transcript_path=tb,
+                              archive_dir=archive_dir, quiet=True)
+        meta_before = json.loads(
+            (cluster_dir / "session.meta.json").read_text(encoding="utf-8")
+        )
+
+        # uuid-b is already a constituent; attempt to re-stitch.
+        # Source JSONL doesn't matter — we should never read it.
+        capsys.readouterr()
+        result = stitch_sessions(
+            target_uuid="uuid-a",
+            source_specs=[("uuid-b", tb)],
+            archive_dir=archive_dir,
+            quiet=False,
+        )
+        assert result == cluster_dir
+        meta_after = json.loads(
+            (cluster_dir / "session.meta.json").read_text(encoding="utf-8")
+        )
+        assert (
+            meta_after["_constituent_sessions"]
+            == meta_before["_constituent_sessions"]
+        )
+        captured = capsys.readouterr()
+        assert "already" in (captured.out + captured.err).lower()
+
+    def test_multiple_sources_per_invocation(self, temp_dir):
+        """A single stitch_sessions call can attach N sources in one pass."""
+        archive_dir = temp_dir / "archives"
+        singleton_dir = _archive_singleton(
+            temp_dir, archive_dir, "uuid-primary", "feat-multi",
+            "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z",
+        )
+
+        srcs: list[tuple[str, Path]] = []
+        for uid, day in [("x", "2026-05-01"), ("y", "2026-05-08"), ("z", "2026-05-16")]:
+            p = _new_session_jsonl(
+                temp_dir, f"uuid-{uid}", None,
+                f"{day}T10:00:00Z", f"{day}T11:00:00Z",
+            )
+            srcs.append((f"uuid-{uid}", p))
+
+        result = stitch_sessions(
+            target_uuid="uuid-primary",
+            source_specs=srcs,
+            archive_dir=archive_dir,
+            quiet=True,
+        )
+        assert result is not None
+        assert result.name.endswith("-stitched")
+        meta = json.loads((result / "session.meta.json").read_text(encoding="utf-8"))
+        ids = [c["id"] for c in meta["_constituent_sessions"]]
+        assert set(ids) == {"uuid-primary", "uuid-x", "uuid-y", "uuid-z"}
+        # Ranks chronological — primary is earliest.
+        assert meta["_constituent_sessions"][0]["id"] == "uuid-primary"

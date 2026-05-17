@@ -722,6 +722,103 @@ def regenerate(
         typer.echo(f"Regenerated {regenerated} session(s)")
 
 
+def _resolve_source_jsonl(source_uuid: str, manifest: dict) -> Path | None:
+    """Resolve a source UUID to its raw JSONL path for `stitch`.
+
+    Manifest hit wins — for sessions already archived as singletons (the
+    MELICA dad509ba case), the archive's own ``raw-transcript.jsonl`` is the
+    canonical source. For unarchived sessions, fall back to scanning
+    ``~/.claude/projects/`` via ``discover_sessions``. Returns ``None`` when
+    neither lookup yields a file.
+    """
+    if source_uuid in manifest:
+        archive_path = Path(manifest[source_uuid])
+        raw = archive_path / "raw-transcript.jsonl"
+        if raw.exists():
+            return raw
+    try:
+        sessions = _discovery.discover_sessions()
+    except RuntimeError:
+        return None
+    for transcript_path, sid in sessions:
+        if sid == source_uuid:
+            return transcript_path
+    return None
+
+
+@app.command()
+def stitch(
+    sessions: list[str] = typer.Argument(
+        ...,
+        help="One or more session UUIDs to attach to --into.",
+    ),
+    into: str = typer.Option(
+        ...,
+        "--into",
+        help="UUID of the target archive (cluster or singleton).",
+    ),
+    local: bool = typer.Option(False, help="Use ./ai_transcripts/"),
+    output: str | None = typer.Option(None, help="Custom archive directory"),
+    quiet: bool = typer.Option(False, help="Suppress output"),
+):
+    """Force-stitch sessions into an existing cluster or singleton (Phase 5).
+
+    Bypasses customTitle detection — useful for legacy sessions that predate
+    the `/exec-session-naming` convention (e.g. MELICA's dad509ba). When the
+    target is a singleton, it is promoted to a cluster as part of the
+    operation. Sources already constituent of the target cluster are skipped
+    (idempotent, exit 0).
+    """
+    if local or output:
+        archive_dir = _discovery.get_archive_dir(
+            local=local,
+            output=output,
+            project_dir=None if local else Path.cwd(),
+        )
+    else:
+        archive_dir = _resolve_archive_dir()
+
+    if not archive_dir.exists():
+        typer.echo(
+            f"Error: no archive found at {archive_dir}. "
+            "Run 'init' or 'archive' first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    manifest = _catalog.load_manifest(archive_dir)
+    if into not in manifest:
+        typer.echo(
+            f"Error: stitch: no archive found for {into}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    source_specs: list[tuple[str, Path]] = []
+    for source_uuid in sessions:
+        jsonl_path = _resolve_source_jsonl(source_uuid, manifest)
+        if jsonl_path is None:
+            typer.echo(
+                f"Error: stitch: cannot locate JSONL for {source_uuid} "
+                "(not in manifest, not under ~/.claude/projects/).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        source_specs.append((source_uuid, jsonl_path))
+
+    result = _archive.stitch_sessions(
+        target_uuid=into,
+        source_specs=source_specs,
+        archive_dir=archive_dir,
+        quiet=quiet,
+    )
+    if result is None:
+        raise typer.Exit(code=1)
+
+    if not quiet:
+        typer.echo(f"Stitched to: {result}")
+
+
 @app.command()
 def clean(
     dry_run: bool = typer.Option(
