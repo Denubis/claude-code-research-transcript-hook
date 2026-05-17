@@ -175,6 +175,143 @@ class TestStatusCommand:
         assert "Needs review:" in result.output
         assert "session-rev" in result.output
 
+    def test_status_dedupes_cluster_constituents(self, temp_dir, monkeypatch, runner):
+        """auto-stitch.AC6.2: a stitched cluster appears as ONE archived row in
+        status, not N rows (one per constituent UUID). Manifest fan-in lists
+        every constituent UUID pointing at the same dir; status must collapse."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+        cluster_dir = archive_dir / "2026-04-24-feat-x-stitched"
+        cluster_dir.mkdir()
+        # Stitched meta: archive.stitched=true, _constituent_sessions of 3.
+        cluster_meta = {
+            "session": {"id": "uuid-a", "started_at": "2026-04-24T10:00:00Z"},
+            "auto_generated": {"title": "feat-x"},
+            "three_ps": {
+                "prompt_summary": "p", "process_summary": "q", "provenance_summary": "r",
+            },
+            "archive": {
+                "directory_name": cluster_dir.name,
+                "needs_review": False,
+                "trivial": False,
+                "stitched": True,
+            },
+            "_constituent_sessions": [
+                {"id": "uuid-a", "rank": 1},
+                {"id": "uuid-b", "rank": 2},
+                {"id": "uuid-c", "rank": 3},
+            ],
+        }
+        (cluster_dir / "session.meta.json").write_text(json.dumps(cluster_meta))
+        manifest = {
+            "uuid-a": str(cluster_dir),
+            "uuid-b": str(cluster_dir),
+            "uuid-c": str(cluster_dir),
+        }
+        (archive_dir / ".session_manifest.json").write_text(json.dumps(manifest))
+        (archive_dir / "CATALOG.json").write_text(
+            json.dumps({"sessions": [
+                {"session_id": "uuid-a", "needs_review": False, "title": "feat-x"},
+            ]})
+        )
+
+        transcripts = []
+        for sid in ["uuid-a", "uuid-b", "uuid-c"]:
+            tp = temp_dir / f"{sid}.jsonl"
+            tp.write_text('{"type":"user","message":{"role":"user","content":"x"}}\n')
+            transcripts.append((tp, sid))
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees",
+            lambda: [temp_dir],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.discover_sessions",
+            lambda: transcripts,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_project_dir_from_transcript",
+            lambda _p: temp_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {},
+        )
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda _cmd, **_kw: type("R", (), {"stdout": str(temp_dir) + "\n", "returncode": 0})(),
+        )
+
+        result = runner.invoke(app, ["status", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # Three transcripts found, one stitched cluster — total counts collapse.
+        assert len(data["archived"]) == 1, (
+            f"expected one cluster row, got {len(data['archived'])}: {data['archived']}"
+        )
+        # The single row identifies as a stitched cluster.
+        assert data["archived"][0].get("stitched") is True
+        assert data["archived"][0].get("constituent_count") == 3
+
+    def test_status_plain_output_shows_cluster_constituent_count(
+        self, temp_dir, monkeypatch, runner,
+    ):
+        """Plain text status names the cluster and its constituent count."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+        cluster_dir = archive_dir / "2026-04-24-feat-y-stitched"
+        cluster_dir.mkdir()
+        (cluster_dir / "session.meta.json").write_text(json.dumps({
+            "session": {"id": "uuid-1", "started_at": "2026-04-24T10:00:00Z"},
+            "auto_generated": {"title": "feat-y"},
+            "three_ps": {
+                "prompt_summary": "p", "process_summary": "q", "provenance_summary": "r",
+            },
+            "archive": {
+                "directory_name": cluster_dir.name,
+                "needs_review": False, "trivial": False, "stitched": True,
+            },
+            "_constituent_sessions": [
+                {"id": "uuid-1", "rank": 1},
+                {"id": "uuid-2", "rank": 2},
+            ],
+        }))
+        (archive_dir / ".session_manifest.json").write_text(json.dumps({
+            "uuid-1": str(cluster_dir), "uuid-2": str(cluster_dir),
+        }))
+        (archive_dir / "CATALOG.json").write_text(json.dumps({"sessions": []}))
+
+        transcripts = [
+            (temp_dir / "uuid-1.jsonl", "uuid-1"),
+            (temp_dir / "uuid-2.jsonl", "uuid-2"),
+        ]
+        for tp, _ in transcripts:
+            tp.write_text('{"type":"user","message":{"role":"user","content":"x"}}\n')
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.resolve_worktrees", lambda: [temp_dir],
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.discover_sessions", lambda: transcripts,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.get_project_dir_from_transcript",
+            lambda _p: temp_dir,
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults", lambda _p: {},
+        )
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda _cmd, **_kw: type("R", (), {"stdout": str(temp_dir) + "\n", "returncode": 0})(),
+        )
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        # Single archived count, mentions cluster + constituents.
+        assert "Archived:    1 sessions" in result.output
+        assert "2 sessions stitched" in result.output or "2 constituents" in result.output
+
     def test_status_omits_lists_when_empty(self, monkeypatch, runner):
         """No section headers when there are no unarchived or needs_review sessions."""
         monkeypatch.setattr(

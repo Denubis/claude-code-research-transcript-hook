@@ -395,26 +395,17 @@ def status(
     manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}
     catalog = _catalog.load_catalog(archive_dir) if archive_dir.exists() else {"sessions": []}
 
-    # Cross-reference sessions with manifest
-    archived = []
-    unarchived = []
-
+    # Cross-reference sessions with manifest. Phase 6 (AC6.2): stitched
+    # clusters appear ONCE in the archived list — manifest fan-in points every
+    # constituent UUID at the same directory, so we group by archive dir first
+    # and emit one row per unique dir with cluster/constituent metadata.
+    dir_to_constituents: dict[str, list[tuple[Path, str]]] = {}
+    unarchived: list[dict] = []
     for transcript_path, session_id in sessions:
         if session_id in manifest:
-            # Check needs_review from catalog
-            catalog_entry = next(
-                (s for s in catalog.get("sessions", []) if s.get("session_id") == session_id),
-                {},
-            )
-            archived.append(
-                {
-                    "session_id": session_id,
-                    "transcript_path": str(transcript_path),
-                    "needs_review": catalog_entry.get("needs_review", True),
-                }
-            )
+            dir_str = manifest[session_id]
+            dir_to_constituents.setdefault(dir_str, []).append((transcript_path, session_id))
         else:
-            # Classify unarchived session
             content = (
                 transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
             )
@@ -426,6 +417,49 @@ def status(
                     "classification": classification,
                 }
             )
+
+    archived: list[dict] = []
+    for dir_str, constituents in dir_to_constituents.items():
+        meta_path = Path(dir_str) / "session.meta.json"
+        is_cluster = False
+        constituent_count = len(constituents)
+        needs_review = True
+        title = None
+        primary_sid = constituents[0][1]
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                archive_block = meta.get("archive", {})
+                is_cluster = bool(archive_block.get("stitched"))
+                needs_review = archive_block.get("needs_review", True)
+                title = meta.get("auto_generated", {}).get("title")
+                if is_cluster:
+                    constituent_count = len(meta.get("_constituent_sessions", []))
+                    cs = meta.get("_constituent_sessions") or []
+                    if cs:
+                        primary_sid = cs[0].get("id", primary_sid)
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+        if title is None:
+            for _, sid in constituents:
+                catalog_entry = next(
+                    (s for s in catalog.get("sessions", []) if s.get("session_id") == sid),
+                    {},
+                )
+                if catalog_entry:
+                    needs_review = catalog_entry.get("needs_review", needs_review)
+                    title = catalog_entry.get("title")
+                    break
+        archived.append(
+            {
+                "session_id": primary_sid,
+                "transcript_path": str(constituents[0][0]),
+                "needs_review": needs_review,
+                "stitched": is_cluster,
+                "constituent_count": constituent_count,
+                "title": title,
+            }
+        )
 
     if json_output:
         typer.echo(
@@ -459,6 +493,16 @@ def status(
             f" ({substantial} substantial, {trivial} trivial)"
         )
         typer.echo(f"  Total:       {len(archived) + len(unarchived)} sessions")
+
+        stitched_rows = [s for s in archived if s.get("stitched")]
+        if stitched_rows:
+            typer.echo("")
+            typer.echo("Stitched clusters:")
+            for entry in stitched_rows:
+                label = entry.get("title") or entry["session_id"]
+                typer.echo(
+                    f"  {label} ({entry['constituent_count']} sessions stitched)"
+                )
 
         if unarchived:
             typer.echo("")

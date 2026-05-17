@@ -150,6 +150,68 @@ class TestRegenerateCommand:
                     f"{path.name}:{n} has trailing whitespace: {line!r}"
                 )
 
+    def test_regenerate_cluster_via_constituent_uuid(self, temp_dir, monkeypatch):
+        """auto-stitch.AC6.3: regenerate --session-id <constituent> rebuilds the
+        cluster's outputs from the concatenated raw — manifest fan-in resolves
+        every constituent UUID to the same cluster dir, so any constituent's
+        UUID is a valid handle on the cluster's render."""
+        archive_dir = temp_dir / ".ai-transcripts"
+        archive_dir.mkdir()
+        cluster_dir = archive_dir / "2026-04-24-stitched-arc-stitched"
+        cluster_dir.mkdir()
+
+        raw = cluster_dir / "raw-transcript.jsonl"
+        raw.write_text(
+            '{"type":"user","message":{"role":"user","content":"Question 1"}}\n'
+            '{"type":"assistant","message":{"role":"assistant","content":"Answer 1"}}\n'
+            '{"type":"user","message":{"role":"user","content":"Question 2"}}\n'
+            '{"type":"assistant","message":{"role":"assistant","content":"Answer 2"}}\n'
+        )
+
+        # Stitched-shape meta.
+        (cluster_dir / "session.meta.json").write_text(json.dumps({
+            "session": {"id": "uuid-primary", "started_at": "2026-04-24T10:00:00Z"},
+            "auto_generated": {"title": "stitched arc"},
+            "three_ps": {
+                "prompt_summary": "p", "process_summary": "q", "provenance_summary": "r",
+            },
+            "archive": {
+                "directory_name": cluster_dir.name,
+                "needs_review": False, "trivial": False, "stitched": True,
+            },
+            "_constituent_sessions": [
+                {"id": "uuid-primary", "rank": 1},
+                {"id": "uuid-second", "rank": 2},
+            ],
+        }))
+        # Manifest fan-in: both constituent UUIDs → same cluster dir.
+        (archive_dir / ".session_manifest.json").write_text(json.dumps({
+            "uuid-primary": str(cluster_dir),
+            "uuid-second": str(cluster_dir),
+        }))
+
+        monkeypatch.setattr(
+            "claude_transcript_archive.cli.subprocess.run",
+            lambda _cmd, **_kw: type("R", (), {"stdout": str(temp_dir), "returncode": 0})(),
+        )
+        monkeypatch.setattr(
+            "claude_transcript_archive.discovery.load_project_defaults",
+            lambda _p: {"target": "branch"},
+        )
+
+        runner = CliRunner()
+        # Invoke with the SECOND constituent's UUID — not the primary — to prove
+        # the resolution works for any constituent.
+        result = runner.invoke(app, ["regenerate", "--session-id", "uuid-second"])
+        assert result.exit_code == 0
+        assert "Regenerated 1" in result.output
+        # Cluster outputs rebuilt.
+        assert (cluster_dir / "conversation.md").exists()
+        # The rebuild covered the concatenated stream (both turn pairs).
+        md_text = (cluster_dir / "conversation.md").read_text(encoding="utf-8")
+        assert "Question 1" in md_text
+        assert "Question 2" in md_text
+
     def test_regenerate_all(self, temp_dir, monkeypatch):
         archive_dir = temp_dir / ".ai-transcripts"
         archive_dir.mkdir()
