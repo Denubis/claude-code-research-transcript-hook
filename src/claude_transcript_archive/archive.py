@@ -1221,10 +1221,14 @@ def archive(
     # Cluster-constituent guard (Phase 4): if existing_dir points to a stitched
     # cluster, this UUID is a constituent. The standard singleton-rewrite path
     # would overwrite the cluster meta and clobber every other constituent's
-    # metadata. No-op: return None when content unchanged (consistent with the
-    # standard same-size short-circuit), else return the cluster dir with a
-    # stderr warning. Updating a growing constituent's slice of a cluster is
-    # Phase 5 territory (manual `stitch` CLI).
+    # metadata.
+    #
+    # Phase 6 addition (AC6.1): when three_ps is supplied (the /transcript
+    # path), route the Three Ps to the cluster's meta via update_metadata so
+    # the curated summary describes the whole arc rather than disappearing.
+    # Otherwise: return None on unchanged content (same as the standard
+    # same-size short-circuit), else return the cluster dir with a warning —
+    # in-place constituent slice updates remain a Phase 5 manual stitch task.
     if existing_dir:
         existing_dir_path = Path(existing_dir)
         existing_meta_path_g = existing_dir_path / "session.meta.json"
@@ -1234,6 +1238,17 @@ def archive(
                     existing_meta_path_g.read_text(encoding="utf-8")
                 )
                 if existing_meta_g.get("archive", {}).get("stitched"):
+                    if three_ps is not None:
+                        update_metadata(
+                            existing_dir_path,
+                            title=provided_title,
+                            tags=tags,
+                            purpose=purpose,
+                            prompt=three_ps.get("prompt_summary"),
+                            process=three_ps.get("process_summary"),
+                            provenance=three_ps.get("provenance_summary"),
+                        )
+                        return existing_dir_path
                     marker = existing_dir_path / ".last_size"
                     current_size = transcript_path.stat().st_size
                     if (

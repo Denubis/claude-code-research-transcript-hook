@@ -994,6 +994,58 @@ class TestStitchSessions:
         captured = capsys.readouterr()
         assert "already" in (captured.out + captured.err).lower()
 
+    def test_ac6_1_three_ps_on_constituent_writes_to_cluster_meta(self, temp_dir):
+        """AC6.1: /transcript invoked on a constituent UUID (= archive() called
+        with --prompt/--process/--provenance for a session that's a cluster
+        member) must write the Three Ps to the CLUSTER's meta, not create a
+        new singleton or no-op silently."""
+        archive_dir = temp_dir / "archives"
+        # Build a 2-member cluster via auto-stitch.
+        ta = _new_session_jsonl(temp_dir, "uuid-a", "feat-x",
+                                 "2026-04-24T10:00:00Z", "2026-04-24T11:00:00Z")
+        tb = _new_session_jsonl(temp_dir, "uuid-b", "feat-x",
+                                 "2026-05-01T10:00:00Z", "2026-05-01T11:00:00Z")
+        archive(session_id="uuid-a", transcript_path=ta,
+                archive_dir=archive_dir, quiet=True)
+        cluster_dir = archive(session_id="uuid-b", transcript_path=tb,
+                              archive_dir=archive_dir, quiet=True)
+        assert cluster_dir is not None and cluster_dir.name.endswith("-stitched")
+
+        # Confirm baseline: no Three Ps yet, needs_review=True.
+        meta_before = json.loads(
+            (cluster_dir / "session.meta.json").read_text(encoding="utf-8")
+        )
+        assert meta_before["archive"]["needs_review"] is True
+        assert meta_before["three_ps"]["prompt_summary"] == ""
+
+        # Simulate /transcript: archive() called with three_ps for uuid-b
+        # (a constituent of the cluster).
+        result = archive(
+            session_id="uuid-b",
+            transcript_path=tb,
+            archive_dir=archive_dir,
+            three_ps={
+                "prompt_summary": "User asked about X",
+                "process_summary": "Used TDD",
+                "provenance_summary": "Phase 4 work",
+            },
+            quiet=True,
+        )
+        assert result == cluster_dir, (
+            "should return the cluster dir, not a new singleton"
+        )
+
+        meta_after = json.loads(
+            (cluster_dir / "session.meta.json").read_text(encoding="utf-8")
+        )
+        assert meta_after["three_ps"]["prompt_summary"] == "User asked about X"
+        assert meta_after["three_ps"]["process_summary"] == "Used TDD"
+        assert meta_after["three_ps"]["provenance_summary"] == "Phase 4 work"
+        assert meta_after["archive"]["needs_review"] is False
+        # Cluster structure preserved.
+        assert meta_after["archive"]["stitched"] is True
+        assert meta_after["_constituent_sessions"] == meta_before["_constituent_sessions"]
+
     def test_multiple_sources_per_invocation(self, temp_dir):
         """A single stitch_sessions call can attach N sources in one pass."""
         archive_dir = temp_dir / "archives"
