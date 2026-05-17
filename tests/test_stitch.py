@@ -850,7 +850,11 @@ class TestStitchSessions:
             quiet=True,
         )
 
-        assert result == cluster_dir
+        assert result is not None
+        assert result.directory == cluster_dir
+        assert result.attached == 1
+        assert result.skipped == 0
+        assert result.failed == 0
         meta = json.loads((cluster_dir / "session.meta.json").read_text(encoding="utf-8"))
         ids = [c["id"] for c in meta["_constituent_sessions"]]
         assert "uuid-z" in ids
@@ -878,14 +882,16 @@ class TestStitchSessions:
         )
 
         assert result is not None
-        assert result.name.endswith("-stitched"), (
-            f"target should have been promoted to cluster; got {result.name}"
+        assert result.directory.name.endswith("-stitched"), (
+            f"target should have been promoted to cluster; got {result.directory.name}"
         )
+        assert result.attached == 1
+        assert result.skipped == 0
         # Old singleton dir no longer exists (renamed).
-        assert not singleton_dir.exists() or singleton_dir == result
+        assert not singleton_dir.exists() or singleton_dir == result.directory
         manifest = _catalog.load_manifest(archive_dir)
-        assert manifest["uuid-solo"] == str(result)
-        assert manifest["uuid-new"] == str(result)
+        assert manifest["uuid-solo"] == str(result.directory)
+        assert manifest["uuid-new"] == str(result.directory)
 
     def test_ac5_2_fold_existing_singleton_into_cluster(self, temp_dir):
         """AC5.2 alt scenario: source UUID is itself an existing singleton.
@@ -919,7 +925,9 @@ class TestStitchSessions:
             archive_dir=archive_dir,
             quiet=True,
         )
-        assert result == cluster_dir
+        assert result is not None
+        assert result.directory == cluster_dir
+        assert result.attached == 1
 
         # Cluster has all three constituents.
         meta = json.loads((cluster_dir / "session.meta.json").read_text(encoding="utf-8"))
@@ -983,7 +991,11 @@ class TestStitchSessions:
             archive_dir=archive_dir,
             quiet=False,
         )
-        assert result == cluster_dir
+        assert result is not None
+        assert result.directory == cluster_dir
+        assert result.attached == 0
+        assert result.skipped == 1
+        assert result.failed == 0
         meta_after = json.loads(
             (cluster_dir / "session.meta.json").read_text(encoding="utf-8")
         )
@@ -1069,8 +1081,10 @@ class TestStitchSessions:
             quiet=True,
         )
         assert result is not None
-        assert result.name.endswith("-stitched")
-        meta = json.loads((result / "session.meta.json").read_text(encoding="utf-8"))
+        assert result.directory.name.endswith("-stitched")
+        assert result.attached == 3
+        assert result.skipped == 0
+        meta = json.loads((result.directory / "session.meta.json").read_text(encoding="utf-8"))
         ids = [c["id"] for c in meta["_constituent_sessions"]]
         assert set(ids) == {"uuid-primary", "uuid-x", "uuid-y", "uuid-z"}
         # Ranks chronological — primary is earliest.

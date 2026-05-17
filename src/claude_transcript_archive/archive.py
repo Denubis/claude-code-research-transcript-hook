@@ -8,6 +8,21 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
+
+
+class StitchResult(NamedTuple):
+    """Result of a ``stitch_sessions`` call.
+
+    Carries the target directory plus counts of how each source was handled so
+    CLI/UI layers can report contextually — "Stitched N into …" when work
+    happened, "No changes — all N already constituent" when every source was a
+    no-op, and the failure count when some sources couldn't be attached.
+    """
+    directory: Path
+    attached: int
+    skipped: int
+    failed: int
 
 from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive import discovery as _discovery
@@ -545,7 +560,7 @@ def stitch_sessions(
     archive_dir: Path,
     *,
     quiet: bool = False,
-) -> Path | None:
+) -> StitchResult | None:
     """Force-stitch ``source_specs`` into the archive identified by
     ``target_uuid`` (Phase 5, AC5.1-AC5.4).
 
@@ -560,19 +575,25 @@ def stitch_sessions(
     after a successful attach and its catalog entry pruned — its content now
     lives in the target's concatenated stream.
 
-    Idempotent per AC5.4: a source UUID already present in the target's
-    ``_constituent_sessions`` is skipped with a stdout note; subsequent
-    sources in the same call still process. Returns ``None`` only on the
-    AC5.3 failure (``target_uuid`` not in manifest); a stdout error names the
-    missing UUID. Returns the target's final directory on success — that path
-    may differ from the initial lookup because the first source's promotion
-    renames the singleton dir.
+    Idempotent per AC5.4: a source UUID already represented by the target
+    (as the cluster's primary, as one of its ``_constituent_sessions``, or as
+    the singleton's own UUID — the MELICA-observed self-stitch case) is
+    counted as skipped with a stdout note; subsequent sources in the same
+    call still process. Returns ``None`` only on the AC5.3 failure
+    (``target_uuid`` not in manifest); a stdout error names the missing UUID.
+    Returns a ``StitchResult`` on success — directory may differ from the
+    initial lookup because the first source's promotion renames the
+    singleton dir, plus counts of attached / skipped / failed so the caller
+    can render contextual output.
     """
     manifest = _catalog.load_manifest(archive_dir)
     if target_uuid not in manifest:
         log_error(f"stitch: no archive found for {target_uuid}", quiet)
         return None
     target_dir = Path(manifest[target_uuid])
+    attached = 0
+    skipped = 0
+    failed = 0
 
     for source_uuid, source_jsonl in source_specs:
         # Re-read each iteration — promotion on the first source moves the
@@ -583,20 +604,34 @@ def stitch_sessions(
         meta_path = target_dir / "session.meta.json"
         is_cluster = False
         constituents: list[dict] = []
+        target_session_id: str | None = None
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 is_cluster = bool(meta.get("archive", {}).get("stitched"))
                 constituents = meta.get("_constituent_sessions", []) or []
+                target_session_id = meta.get("session", {}).get("id")
             except (json.JSONDecodeError, ValueError, OSError):
                 pass
 
-        if any(c.get("id") == source_uuid for c in constituents):
+        # Idempotency / no-op detection:
+        # (a) source already a constituent (the cluster case — AC5.4), or
+        # (b) source IS the target itself (the MELICA-observed degenerate
+        #     case: stitch --into X X. For a cluster this is the same as
+        #     case (a) because the primary is always a constituent; for a
+        #     singleton it would otherwise dispatch to promote which then
+        #     refuses via its self-promotion guard — counting that as
+        #     "failed" misleads the user about what happened).
+        if (
+            any(c.get("id") == source_uuid for c in constituents)
+            or source_uuid == target_session_id
+        ):
             log_info(
-                f"stitch: {source_uuid} already in cluster {target_dir.name} — "
-                "no-op.",
+                f"stitch: {source_uuid} already represents target "
+                f"{target_dir.name} — no-op.",
                 quiet,
             )
+            skipped += 1
             continue
 
         # Capture source's old archive dir BEFORE dispatch — extend/promote
@@ -621,8 +656,10 @@ def stitch_sessions(
                 f"stitch: failed to attach {source_uuid} to {target_dir.name}",
                 quiet,
             )
+            failed += 1
             continue
 
+        attached += 1
         # Promotion renames target_dir — track the new location for the next
         # iteration via the manifest re-read at the top of the loop.
         target_dir = result
@@ -659,7 +696,13 @@ def stitch_sessions(
 
     # Final lookup — promotion-aware.
     manifest = _catalog.load_manifest(archive_dir)
-    return Path(manifest.get(target_uuid, str(target_dir)))
+    final_dir = Path(manifest.get(target_uuid, str(target_dir)))
+    return StitchResult(
+        directory=final_dir,
+        attached=attached,
+        skipped=skipped,
+        failed=failed,
+    )
 
 
 def _find_matching_cluster_or_singleton(
