@@ -539,6 +539,489 @@ def stitch_cluster(
     return output_dir
 
 
+def _find_matching_cluster_or_singleton(
+    archive_dir: Path,
+    custom_title: str,
+    *,
+    quiet: bool = False,
+) -> tuple[Path, bool] | None:
+    """Scan the project's archives for one whose primary content carries the
+    same ``customTitle`` (Phase 4 auto-stitch dispatch — DR1's match signal).
+
+    Iterates the manifest's unique target directories (manifest fan-in means
+    one cluster can have multiple manifest entries), reads each archive's
+    ``raw-transcript.jsonl`` head for its ``customTitle``, and returns the
+    most recently archived match as ``(archive_path, is_cluster)``. When
+    multiple matches exist (legacy archives, partial promotions), emits a
+    stderr warning naming the others so the user can reconcile via Phase 5's
+    manual ``stitch`` CLI. Returns ``None`` when no archive matches.
+    """
+    manifest = _catalog.load_manifest(archive_dir)
+    seen: set[str] = set()
+    matches: list[tuple[Path, bool, str]] = []
+    for dir_str in manifest.values():
+        if dir_str in seen:
+            continue
+        seen.add(dir_str)
+        archive_path = Path(dir_str)
+        meta_path = archive_path / "session.meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
+        raw_path = archive_path / "raw-transcript.jsonl"
+        if not raw_path.exists():
+            continue
+        try:
+            archived_title = _metadata.extract_custom_title(
+                raw_path.read_text(encoding="utf-8")
+            )
+        except OSError:
+            continue
+        if archived_title == custom_title:
+            is_cluster = bool(meta.get("archive", {}).get("stitched"))
+            archived_at = meta.get("archive", {}).get("archived_at") or ""
+            matches.append((archive_path, is_cluster, archived_at))
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        names = ", ".join(m[0].name for m in matches)
+        log_warning(
+            f"Multiple archives match customTitle '{custom_title}': {names}; "
+            "using most recently archived. Reconcile via the manual `stitch` "
+            "CLI (Phase 5) if this is wrong.",
+            quiet,
+        )
+    matches.sort(key=lambda m: m[2], reverse=True)
+    return matches[0][0], matches[0][1]
+
+
+def promote_singleton_to_cluster(
+    singleton_dir: Path,
+    new_session_id: str,
+    new_transcript_path: Path,
+    *,
+    quiet: bool = False,
+) -> Path | None:
+    """In-place upgrade of a singleton archive to a stitched cluster (Phase 4,
+    AC4.1/AC4.3).
+
+    Implements DR3's rename-before-rewrite sequence: pre-rename validation
+    (missing inputs abort cleanly, leaving the singleton intact); compute the
+    new cluster name ``YYYY-MM-DD-<customTitle>-stitched`` with collision
+    resolution; ``os.rename`` the directory; then write the concatenated
+    ``raw-transcript.jsonl`` and ``<primary-uuid>.jsonl`` mirror, rewrite the
+    meta in stitched schema, fan both old- and new-UUIDs into the manifest,
+    and re-render HTML.
+
+    Curated Three Ps and tags on the singleton are preserved into the
+    cluster's meta — promotion is a structural upgrade, not a metadata reset.
+
+    Best-effort once the rename succeeds: post-rename failures log warnings
+    via ``log_warning`` but the function still returns ``new_cluster_dir`` so
+    the caller sees the new path. A pre-rename failure returns ``None`` and
+    leaves the singleton untouched.
+    """
+    archive_dir = singleton_dir.parent
+
+    if new_session_id == singleton_dir.name:
+        log_warning(
+            "promote: refusing self-promotion — new_session_id matches "
+            "singleton dir name.",
+            quiet,
+        )
+        return None
+
+    if not singleton_dir.is_dir():
+        log_warning(f"promote: singleton dir not found: {singleton_dir}", quiet)
+        return None
+    if not new_transcript_path.exists():
+        log_warning(
+            f"promote: new transcript not found: {new_transcript_path}", quiet,
+        )
+        return None
+
+    singleton_meta_path = singleton_dir / "session.meta.json"
+    if not singleton_meta_path.exists():
+        log_warning(f"promote: singleton meta not found: {singleton_meta_path}", quiet)
+        return None
+    try:
+        singleton_meta = json.loads(singleton_meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        log_warning(f"promote: cannot read singleton meta: {exc}", quiet)
+        return None
+
+    singleton_session_id = singleton_meta.get("session", {}).get("id")
+    if not singleton_session_id:
+        log_warning("promote: singleton meta missing session.id", quiet)
+        return None
+    if singleton_session_id == new_session_id:
+        log_warning(
+            f"promote: refusing self-promotion — new_session_id "
+            f"{new_session_id} matches singleton's UUID.",
+            quiet,
+        )
+        return None
+
+    singleton_raw_path = singleton_dir / "raw-transcript.jsonl"
+    if not singleton_raw_path.exists():
+        log_warning("promote: singleton raw-transcript.jsonl missing", quiet)
+        return None
+    try:
+        singleton_content = singleton_raw_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"promote: cannot read singleton raw: {exc}", quiet)
+        return None
+
+    try:
+        new_content = new_transcript_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"promote: cannot read new transcript: {exc}", quiet)
+        return None
+    if not new_content.strip():
+        log_warning(f"promote: new transcript is empty: {new_transcript_path}", quiet)
+        return None
+
+    singleton_started = singleton_meta.get("session", {}).get("started_at") or ""
+    singleton_ended = singleton_meta.get("session", {}).get("ended_at") or ""
+    singleton_stats = _metadata.extract_session_stats(singleton_content)
+
+    new_stats = _metadata.extract_session_stats(new_content)
+    new_started = new_stats.get("started_at") or ""
+    new_ended = new_stats.get("ended_at") or ""
+
+    parsed = [
+        {
+            "session_id": singleton_session_id,
+            "content": singleton_content,
+            "started_at": singleton_started,
+            "ended_at": singleton_ended,
+            "stats": singleton_stats,
+        },
+        {
+            "session_id": new_session_id,
+            "content": new_content,
+            "started_at": new_started,
+            "ended_at": new_ended,
+            "stats": new_stats,
+        },
+    ]
+    parsed.sort(key=lambda p: p["started_at"])
+    primary = parsed[0]
+    primary_session_id = primary["session_id"]
+    primary_started = primary["started_at"]
+    latest_ended = max((p["ended_at"] or p["started_at"]) for p in parsed)
+
+    title = (
+        _metadata.extract_custom_title(primary["content"])
+        or singleton_meta.get("auto_generated", {}).get("title")
+        or "untitled"
+    )
+    date_str = (
+        primary_started[:10] if primary_started else datetime.now().strftime("%Y-%m-%d")
+    )
+    safe_title = sanitize_filename(title)
+    base_directory_name = (
+        f"{date_str}-{safe_title or primary_session_id[:8]}-stitched"
+    )
+
+    directory_name, new_cluster_dir = _resolve_collision(
+        archive_dir, base_directory_name, primary_session_id, quiet,
+    )
+    # Guard against clobbering an existing UNRELATED archive at the target name.
+    # _resolve_collision returns the path even if it exists when the existing
+    # session is the same; for promotion, "same session" can only be ourself
+    # (singleton_dir name == new name, which is a no-op rename).
+    if (
+        new_cluster_dir.exists()
+        and new_cluster_dir != singleton_dir
+    ):
+        log_warning(
+            f"promote: target directory {new_cluster_dir.name} already "
+            "exists; aborting to avoid clobbering.",
+            quiet,
+        )
+        return None
+
+    total_user = sum(p["stats"].get("human_messages", 0) for p in parsed)
+    total_assistant = sum(p["stats"].get("assistant_messages", 0) for p in parsed)
+
+    concatenated_parts: list[str] = []
+    for p in parsed:
+        body = p["content"]
+        if not body.endswith("\n"):
+            body = body + "\n"
+        concatenated_parts.append(body)
+    concatenated = "".join(concatenated_parts)
+    jsonl_lines = sum(1 for line in concatenated.split("\n") if line.strip())
+
+    aggregated_stats = {
+        "turns": total_user + total_assistant,
+        "user_messages": total_user,
+        "assistant_messages": total_assistant,
+        "jsonl_lines": jsonl_lines,
+    }
+
+    try:
+        start_dt = datetime.fromisoformat(primary_started.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(latest_ended.replace("Z", "+00:00"))
+        duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+    except (ValueError, TypeError, AttributeError):
+        duration_minutes = 0
+
+    model_id = (
+        singleton_meta.get("model", {}).get("model_id")
+        or new_stats.get("model")
+        or "unknown"
+    )
+    if model_id == "unknown":
+        model_id = new_stats.get("model") or model_id
+    cc_version = (
+        singleton_meta.get("model", {}).get("claude_code_version")
+        or new_stats.get("claude_code_version")
+    )
+
+    project_dir_str = singleton_meta.get("project", {}).get("directory")
+    project_dir = Path(project_dir_str) if project_dir_str else None
+
+    singleton_three_ps = singleton_meta.get("three_ps") or {}
+    has_curated_three_ps = any(
+        singleton_three_ps.get(k)
+        for k in ("prompt_summary", "process_summary", "provenance_summary")
+    )
+    needs_review = not has_curated_three_ps
+    tags = singleton_meta.get("auto_generated", {}).get("tags") or None
+    purpose = singleton_meta.get("auto_generated", {}).get("purpose") or None
+
+    constituents_for_meta = [(p["session_id"], p["started_at"]) for p in parsed]
+
+    # DR3 step 4 — rename. Past this point we return new_cluster_dir even on
+    # partial failures so the caller sees the new path.
+    if new_cluster_dir != singleton_dir:
+        try:
+            singleton_dir.rename(new_cluster_dir)
+        except OSError as exc:
+            log_warning(
+                f"promote: rename failed ({singleton_dir.name} → "
+                f"{new_cluster_dir.name}): {exc}; singleton untouched.",
+                quiet,
+            )
+            return None
+
+    new_raw_path = new_cluster_dir / "raw-transcript.jsonl"
+    try:
+        new_raw_path.write_text(concatenated, encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"promote: raw-transcript write failed: {exc}", quiet)
+        return new_cluster_dir
+
+    primary_jsonl_path = new_cluster_dir / f"{primary_session_id}.jsonl"
+    try:
+        primary_jsonl_path.write_text(concatenated, encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"promote: primary jsonl mirror write failed: {exc}", quiet)
+
+    metadata = _metadata.create_stitched_metadata(
+        primary_session_id=primary_session_id,
+        constituents=constituents_for_meta,
+        raw_transcript_path=new_raw_path,
+        aggregated_stats=aggregated_stats,
+        directory_name=directory_name,
+        started_at=primary_started,
+        ended_at=latest_ended,
+        duration_minutes=duration_minutes,
+        model_id=model_id,
+        claude_code_version=cc_version,
+        title=title,
+        three_ps=singleton_three_ps if has_curated_three_ps else None,
+        needs_review=needs_review,
+        trivial=False,
+        project_dir=project_dir,
+        tags=tags,
+        purpose=purpose,
+    )
+
+    new_meta_path = new_cluster_dir / "session.meta.json"
+    try:
+        new_meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"promote: meta write failed: {exc}", quiet)
+
+    manifest = _catalog.load_manifest(archive_dir)
+    manifest[singleton_session_id] = str(new_cluster_dir)
+    manifest[new_session_id] = str(new_cluster_dir)
+    try:
+        _catalog.save_manifest(archive_dir, manifest)
+    except OSError as exc:
+        log_warning(f"promote: manifest save failed: {exc}", quiet)
+
+    try:
+        _catalog.update_catalog(archive_dir, metadata)
+    except (OSError, KeyError) as exc:
+        log_warning(f"promote: catalog update failed: {exc}", quiet)
+
+    try:
+        result = subprocess.run(
+            [
+                "claude-code-transcripts", "json", str(new_raw_path),
+                "-o", str(new_cluster_dir), "--json",
+            ],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+        if result.returncode != 0:
+            log_warning(
+                f"promote: claude-code-transcripts: {result.stderr.strip()}", quiet,
+            )
+    except FileNotFoundError:
+        log_warning(
+            "promote: claude-code-transcripts not on PATH; HTML not re-rendered.",
+            quiet,
+        )
+
+    _output.update_html_titles(new_cluster_dir, title)
+
+    (new_cluster_dir / ".title").write_text(title, encoding="utf-8")
+    (new_cluster_dir / ".last_size").write_text(
+        str(new_transcript_path.stat().st_size), encoding="utf-8",
+    )
+
+    normalise_text_outputs(new_cluster_dir)
+    return new_cluster_dir
+
+
+def extend_cluster(
+    cluster_dir: Path,
+    new_session_id: str,
+    new_transcript_path: Path,
+    *,
+    quiet: bool = False,
+) -> Path | None:
+    """Append one constituent to an already-stitched cluster (Phase 4, AC4.2-AC4.4).
+
+    Mirrors the MELICA scripts/stitch_archive_extend.py contract verbatim:
+    appends the new JSONL to both ``raw-transcript.jsonl`` and the primary's
+    ``<primary-uuid>.jsonl`` mirror, increments statistics, appends a new
+    ``_constituent_sessions`` entry with ``rank = N + 1``, stamps
+    ``archive.extended_at``, and fans the manifest so the new UUID resolves to
+    this cluster.
+
+    Idempotent on the new UUID: when ``new_session_id`` is already a
+    constituent, returns ``cluster_dir`` unchanged after a stderr warning
+    (matches ``stitch_archive_extend.py`` lines 189-192 — AC4.4's contract).
+
+    Best-effort: errors are logged via log_warning; the function never raises
+    because ``archive()`` calls it from the hook path which must stay
+    non-fatal. Returns ``cluster_dir`` on success or after idempotent no-op,
+    ``None`` when the cluster is unreadable or the new transcript is missing.
+    """
+    archive_dir = cluster_dir.parent
+
+    meta_path = cluster_dir / "session.meta.json"
+    if not meta_path.exists():
+        log_warning(f"extend_cluster: no session.meta.json in {cluster_dir}", quiet)
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        log_warning(f"extend_cluster: cannot read cluster meta {meta_path}: {exc}", quiet)
+        return None
+
+    constituents = meta.setdefault("_constituent_sessions", [])
+    if any(c.get("id") == new_session_id for c in constituents):
+        log_warning(
+            f"extend_cluster: UUID {new_session_id} already in "
+            f"_constituent_sessions of {cluster_dir.name} — no-op.",
+            quiet,
+        )
+        return cluster_dir
+
+    if not new_transcript_path.exists():
+        log_warning(f"extend_cluster: transcript not found: {new_transcript_path}", quiet)
+        return None
+    try:
+        new_content = new_transcript_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"extend_cluster: cannot read {new_transcript_path}: {exc}", quiet)
+        return None
+    if not new_content.strip():
+        log_warning(f"extend_cluster: transcript is empty: {new_transcript_path}", quiet)
+        return None
+
+    raw_path = cluster_dir / "raw-transcript.jsonl"
+    primary_uuid = meta.get("session", {}).get("id")
+    primary_jsonl_path = (
+        cluster_dir / f"{primary_uuid}.jsonl" if primary_uuid else None
+    )
+
+    # Ensure single newline boundary before appending.
+    appended = new_content if new_content.endswith("\n") else new_content + "\n"
+
+    try:
+        with raw_path.open("a", encoding="utf-8") as f:
+            f.write(appended)
+        if primary_jsonl_path and primary_jsonl_path.exists():
+            with primary_jsonl_path.open("a", encoding="utf-8") as f:
+                f.write(appended)
+    except OSError as exc:
+        log_warning(f"extend_cluster: append failed for {cluster_dir.name}: {exc}", quiet)
+        return None
+
+    new_stats = _metadata.extract_session_stats(new_content)
+    new_user = new_stats.get("human_messages", 0)
+    new_assistant = new_stats.get("assistant_messages", 0)
+    new_lines = sum(1 for line in new_content.split("\n") if line.strip())
+
+    stats = meta.setdefault("statistics", {})
+    stats["user_messages"] = stats.get("user_messages", 0) + new_user
+    stats["assistant_messages"] = stats.get("assistant_messages", 0) + new_assistant
+    stats["turns"] = stats.get("user_messages", 0) + stats.get("assistant_messages", 0)
+    stats["jsonl_lines"] = stats.get("jsonl_lines", 0) + new_lines
+    stats["raw_transcript_bytes"] = raw_path.stat().st_size
+
+    constituents.append({"id": new_session_id, "rank": len(constituents) + 1})
+
+    new_ended_at = new_stats.get("ended_at")
+    if new_ended_at:
+        current_ended = meta.get("session", {}).get("ended_at") or ""
+        if new_ended_at > current_ended:
+            meta["session"]["ended_at"] = new_ended_at
+            started = meta.get("session", {}).get("started_at")
+            try:
+                start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(new_ended_at.replace("Z", "+00:00"))
+                meta["session"]["duration_minutes"] = int(
+                    (end_dt - start_dt).total_seconds() / 60
+                )
+            except (AttributeError, ValueError, TypeError):
+                pass
+
+    meta.setdefault("archive", {})["extended_at"] = datetime.now().isoformat()
+
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except OSError as exc:
+        log_warning(f"extend_cluster: meta write failed for {cluster_dir.name}: {exc}", quiet)
+        return cluster_dir
+
+    manifest = _catalog.load_manifest(archive_dir)
+    manifest[new_session_id] = str(cluster_dir)
+    try:
+        _catalog.save_manifest(archive_dir, manifest)
+    except OSError as exc:
+        log_warning(f"extend_cluster: manifest save failed: {exc}", quiet)
+
+    try:
+        _catalog.update_catalog(archive_dir, meta)
+    except (OSError, KeyError) as exc:
+        log_warning(f"extend_cluster: catalog update failed: {exc}", quiet)
+
+    normalise_text_outputs(cluster_dir)
+    return cluster_dir
+
+
 def archive(
     session_id: str,
     transcript_path: Path,
@@ -611,6 +1094,61 @@ def archive(
 
     # Check if we already have a directory for this session
     existing_dir = manifest.get(session_id)
+
+    # Cluster-constituent guard (Phase 4): if existing_dir points to a stitched
+    # cluster, this UUID is a constituent. The standard singleton-rewrite path
+    # would overwrite the cluster meta and clobber every other constituent's
+    # metadata. No-op: return None when content unchanged (consistent with the
+    # standard same-size short-circuit), else return the cluster dir with a
+    # stderr warning. Updating a growing constituent's slice of a cluster is
+    # Phase 5 territory (manual `stitch` CLI).
+    if existing_dir:
+        existing_dir_path = Path(existing_dir)
+        existing_meta_path_g = existing_dir_path / "session.meta.json"
+        if existing_meta_path_g.exists():
+            try:
+                existing_meta_g = json.loads(
+                    existing_meta_path_g.read_text(encoding="utf-8")
+                )
+                if existing_meta_g.get("archive", {}).get("stitched"):
+                    marker = existing_dir_path / ".last_size"
+                    current_size = transcript_path.stat().st_size
+                    if (
+                        marker.exists()
+                        and int(marker.read_text(encoding="utf-8")) == current_size
+                    ):
+                        return None
+                    log_warning(
+                        f"Session {session_id} is a constituent of cluster "
+                        f"'{existing_dir_path.name}'; transcript content "
+                        "differs from the cluster's recorded baseline but "
+                        "in-place constituent updates are deferred to the "
+                        "Phase 5 manual `stitch` CLI.",
+                        quiet,
+                    )
+                    return existing_dir_path
+            except (json.JSONDecodeError, ValueError, OSError):
+                pass
+
+    # Auto-stitch dispatch (Phase 4): only fires for NEW sessions (not yet in
+    # manifest) arriving via the hook path (three_ps is None — /transcript
+    # supplies three_ps and stays singleton; Phase 6 will surface clusters to
+    # /transcript). The match signal is DR1's `customTitle` equality.
+    if not existing_dir and three_ps is None:
+        custom_title = _metadata.extract_custom_title(content)
+        if custom_title:
+            match = _find_matching_cluster_or_singleton(
+                archive_dir, custom_title, quiet=quiet,
+            )
+            if match is not None:
+                match_dir, is_cluster = match
+                if is_cluster:
+                    return extend_cluster(
+                        match_dir, session_id, transcript_path, quiet=quiet,
+                    )
+                return promote_singleton_to_cluster(
+                    match_dir, session_id, transcript_path, quiet=quiet,
+                )
 
     # Manifest-pointer protection: if a curated archive already exists for this
     # session_id (non-empty Three Ps) and the incoming run does NOT supply its
