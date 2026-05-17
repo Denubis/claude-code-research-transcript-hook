@@ -559,15 +559,35 @@ def bulk(
     archived_count = 0
     trivial_count = 0
 
-    # auto-stitch Phase 2: group by (project, customTitle); singletons take the
-    # existing archive() path, multi-session clusters trip a Phase-3 stub.
-    # Phase 3 will replace the raise with a call to stitch_cluster().
+    # auto-stitch: group by (project, customTitle); singletons take the
+    # existing archive() path, multi-session clusters dispatch to stitch_cluster.
     clusters = _discovery.discover_clusters(unarchived)
+    stitched_count = 0
 
     for members in clusters.values():
         if len(members) >= 2:
-            msg = "stitch_cluster (Phase 3) not yet implemented"
-            raise NotImplementedError(msg)
+            # Cluster trivial classification: stitched arcs are by definition
+            # substantial (≥2 substantial-or-trivial sessions on the same arc);
+            # we mark trivial only if every constituent is trivial individually.
+            cluster_trivial = all(
+                _metadata.classify_session(
+                    p.read_text(encoding="utf-8") if p.exists() else ""
+                ) == "trivial"
+                for p, _ in members
+            )
+            if cluster_trivial:
+                trivial_count += 1
+            result = _archive.stitch_cluster(
+                members,
+                archive_dir,
+                quiet=quiet,
+                tags=merged_tags,
+                purpose=merged_purpose,
+                trivial=cluster_trivial,
+            )
+            if result:
+                stitched_count += 1
+            continue
 
         transcript_path, session_id = members[0]
         content = transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
@@ -590,9 +610,11 @@ def bulk(
             archived_count += 1
 
     if not quiet:
+        stitch_phrase = f", {stitched_count} stitched" if stitched_count else ""
         typer.echo(
             f"Bulk archive complete: {archived_count} archived"
-            f" ({trivial_count} trivial), {len(sessions) - len(unarchived)} already archived"
+            f" ({trivial_count} trivial){stitch_phrase}"
+            f", {len(sessions) - len(unarchived)} already archived"
         )
 
 

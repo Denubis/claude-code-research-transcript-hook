@@ -330,6 +330,215 @@ def migrate_legacy(legacy_dir: Path, target_dir: Path, *, dry_run: bool = True) 
     return migrated
 
 
+def stitch_cluster(
+    members: list[tuple[Path, str]],
+    archive_dir: Path,
+    *,
+    quiet: bool = False,
+    title: str | None = None,
+    three_ps: dict[str, str] | None = None,
+    tags: list[str] | None = None,
+    purpose: str | None = None,
+    trivial: bool = False,
+) -> Path | None:
+    """Build a fresh stitched archive directory from N (>=2) constituent JSONLs.
+
+    Concatenates the constituent transcripts in chronological order, writes the
+    MELICA-shaped stitched session.meta.json (see create_stitched_metadata),
+    fans every constituent UUID into the archive's manifest pointing at the new
+    cluster directory, and renders HTML/MD/PDF as for any other archive.
+
+    Returns the cluster directory path on success, None on a per-member read
+    failure. Raises ValueError if fewer than 2 members are supplied — single
+    sessions belong to archive(), not stitch_cluster().
+
+    Naming: cluster directory is ``YYYY-MM-DD-<sanitised-title>-stitched``
+    where the date is the earliest constituent's start. Title comes from the
+    explicit ``title`` argument if supplied, else from extract_custom_title()
+    on the primary (the earliest constituent), else from generate_title_from_
+    content() as a last resort.
+    """
+    if len(members) < 2:
+        msg = "stitch_cluster requires at least 2 members; use archive() for singletons"
+        raise ValueError(msg)
+
+    parsed: list[dict] = []
+    for transcript_path, session_id in members:
+        if not transcript_path.exists():
+            log_error(f"Transcript not found: {transcript_path}", quiet)
+            return None
+        content = transcript_path.read_text(encoding="utf-8")
+        if not content.strip():
+            log_error(f"Transcript is empty: {transcript_path}", quiet)
+            return None
+        stats = _metadata.extract_session_stats(content)
+        parsed.append({
+            "path": transcript_path,
+            "session_id": session_id,
+            "content": content,
+            "stats": stats,
+            "started_at": stats.get("started_at") or "",
+            "ended_at": stats.get("ended_at") or "",
+        })
+
+    # Chronological sort — rank in _constituent_sessions follows this order.
+    parsed.sort(key=lambda p: p["started_at"])
+    primary = parsed[0]
+    primary_session_id = primary["session_id"]
+    primary_started = primary["started_at"]
+    latest_ended = max((p["ended_at"] or p["started_at"]) for p in parsed)
+
+    # Resolve cluster title. customTitle is the auto-stitch detection signal
+    # (DR1), so the primary's customTitle is the natural cluster label.
+    if title is None:
+        custom = _metadata.extract_custom_title(primary["content"])
+        title = custom or generate_title_from_content(primary["content"])
+
+    date_str = primary_started[:10] if primary_started else datetime.now().strftime("%Y-%m-%d")
+    safe_title = sanitize_filename(title)
+    base_directory_name = (
+        f"{date_str}-{safe_title or primary_session_id[:8]}-stitched"
+    )
+
+    directory_name, output_dir = _resolve_collision(
+        archive_dir, base_directory_name, primary_session_id, quiet
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Concatenate JSONLs — each constituent's content trimmed to ensure a single
+    # newline boundary between blocks (avoids accidental blank lines messing up
+    # downstream line counts).
+    concatenated_parts: list[str] = []
+    for p in parsed:
+        body = p["content"]
+        if not body.endswith("\n"):
+            body = body + "\n"
+        concatenated_parts.append(body)
+    concatenated = "".join(concatenated_parts)
+
+    raw_path = output_dir / "raw-transcript.jsonl"
+    raw_path.write_text(concatenated, encoding="utf-8")
+    # Mirror to <primary-uuid>.jsonl for claude-code-transcripts' file-name
+    # convention; both files hold the same concatenated stream (MELICA verbatim).
+    primary_jsonl_path = output_dir / f"{primary_session_id}.jsonl"
+    primary_jsonl_path.write_text(concatenated, encoding="utf-8")
+
+    total_user = sum(p["stats"].get("human_messages", 0) for p in parsed)
+    total_assistant = sum(p["stats"].get("assistant_messages", 0) for p in parsed)
+    jsonl_lines = sum(1 for line in concatenated.split("\n") if line.strip())
+
+    aggregated_stats = {
+        "turns": total_user + total_assistant,
+        "user_messages": total_user,
+        "assistant_messages": total_assistant,
+        "jsonl_lines": jsonl_lines,
+    }
+
+    try:
+        start_dt = datetime.fromisoformat(primary_started.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(latest_ended.replace("Z", "+00:00"))
+        duration_minutes = int((end_dt - start_dt).total_seconds() / 60)
+    except (ValueError, TypeError, AttributeError):
+        duration_minutes = 0
+
+    model_id: str | None = None
+    cc_version: str | None = None
+    for p in parsed:
+        if not model_id:
+            model_id = p["stats"].get("model")
+        if not cc_version:
+            cc_version = p["stats"].get("claude_code_version")
+        if model_id and cc_version:
+            break
+
+    project_dir = _discovery.get_project_dir_from_transcript(primary["path"])
+    constituents_for_meta = [(p["session_id"], p["started_at"]) for p in parsed]
+
+    needs_review = three_ps is None
+    metadata = _metadata.create_stitched_metadata(
+        primary_session_id=primary_session_id,
+        constituents=constituents_for_meta,
+        raw_transcript_path=raw_path,
+        aggregated_stats=aggregated_stats,
+        directory_name=directory_name,
+        started_at=primary_started,
+        ended_at=latest_ended,
+        duration_minutes=duration_minutes,
+        model_id=model_id,
+        claude_code_version=cc_version,
+        title=title,
+        three_ps=three_ps,
+        needs_review=needs_review,
+        trivial=trivial,
+        project_dir=project_dir,
+        tags=tags,
+        purpose=purpose,
+    )
+
+    # Fan manifest — every constituent UUID points at the cluster (AC3.1/AC3.2).
+    manifest = _catalog.load_manifest(archive_dir)
+    for p in parsed:
+        manifest[p["session_id"]] = str(output_dir)
+    _catalog.save_manifest(archive_dir, manifest)
+
+    archive_meta_path = output_dir / "session.meta.json"
+    archive_meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    # Sidecar next to each constituent's original JSONL so per-source lookups
+    # (e.g. /transcript invoked from a constituent UUID) resolve to cluster meta.
+    for p in parsed:
+        sidecar_path = p["path"].with_suffix(".jsonl.meta.json")
+        with contextlib.suppress(PermissionError):
+            sidecar_path.write_text(
+                json.dumps(metadata, indent=2), encoding="utf-8"
+            )
+
+    # Render HTML via claude-code-transcripts on concatenated raw.
+    try:
+        result = subprocess.run(
+            [
+                "claude-code-transcripts",
+                "json",
+                str(raw_path),
+                "-o",
+                str(output_dir),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if result.returncode != 0:
+            log_error(f"claude-code-transcripts failed: {result.stderr}", quiet)
+    except FileNotFoundError:
+        log_error(
+            "claude-code-transcripts not found. Install with: pip install claude-code-transcripts",
+            quiet,
+        )
+
+    _output.update_html_titles(output_dir, title)
+
+    # MD and PDF only when Three Ps supplied (matches singleton convention).
+    if three_ps is not None:
+        conv_msgs = _output.extract_conversation_messages(concatenated)
+        if conv_msgs:
+            md_content = _output.generate_conversation_markdown(
+                conv_msgs, title, metadata=metadata
+            )
+            (output_dir / "conversation.md").write_text(md_content, encoding="utf-8")
+            pdf_path = output_dir / "conversation.pdf"
+            _output.generate_conversation_pdf(
+                conv_msgs, title, pdf_path, quiet=quiet, metadata=metadata
+            )
+
+    _catalog.update_catalog(archive_dir, metadata)
+
+    (output_dir / ".title").write_text(title, encoding="utf-8")
+    normalise_text_outputs(output_dir)
+
+    return output_dir
+
+
 def archive(
     session_id: str,
     transcript_path: Path,

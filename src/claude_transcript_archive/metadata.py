@@ -419,6 +419,108 @@ def compute_file_hash(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def create_stitched_metadata(
+    primary_session_id: str,
+    constituents: list[tuple[str, str]],
+    raw_transcript_path: Path,
+    aggregated_stats: dict[str, Any],
+    directory_name: str,
+    started_at: str | None,
+    ended_at: str | None,
+    duration_minutes: int,
+    model_id: str | None,
+    claude_code_version: str | None,
+    title: str,
+    three_ps: dict[str, str] | None = None,
+    needs_review: bool = True,
+    trivial: bool = False,
+    project_dir: Path | None = None,
+    tags: list[str] | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any]:
+    """Build a stitched-cluster session.meta.json matching the MELICA hand-rolled
+    schema verbatim.
+
+    Reference: /media/brian/storage/people/Adela/melica/ai_transcripts/
+    2026-04-24-dvc-sciencedata-archive-phase5-to-pr49-stitched/session.meta.json
+
+    Key divergences from create_session_metadata (DR5):
+    - statistics is the simplified shape (turns, user_messages, assistant_messages,
+      jsonl_lines, raw_transcript_bytes) — no tokens, cost, tool_calls, thinking_blocks.
+      Field is named user_messages to match the hand-rolled cluster, not the
+      singleton schema's human_messages.
+    - artifacts is a file-ref dict (raw_transcript, primary_jsonl, raw_transcript_sha256),
+      not the created/modified/referenced shape used by singletons. Per-file artifact
+      tracking would require re-parsing the concatenated stream; not done here for
+      verbatim MELICA match.
+    - relationships is {} (verbatim from MELICA), not the continues/references/isPartOf
+      shape singletons use.
+    - archive.stitched is True; archive drops jsonl_path/jsonl_sha256/jsonl_bytes
+      (those fields move to artifacts/statistics).
+    - _constituent_sessions lists every member with 1-indexed chronological rank.
+
+    The `constituents` argument must already be chronologically ordered (earliest
+    start first) — rank is assigned by list position, not re-sorted.
+    """
+    raw_bytes = raw_transcript_path.stat().st_size
+    raw_sha256 = compute_file_hash(raw_transcript_path)
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "session": {
+            "id": primary_session_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_minutes": duration_minutes,
+        },
+        "project": {
+            "name": project_dir.name if project_dir else None,
+            "directory": str(project_dir) if project_dir else None,
+        },
+        "model": {
+            "provider": "anthropic",
+            "model_id": model_id or "unknown",
+            "claude_code_version": claude_code_version,
+            "access_method": "claude-code-cli",
+        },
+        "statistics": {
+            "turns": aggregated_stats["turns"],
+            "user_messages": aggregated_stats["user_messages"],
+            "assistant_messages": aggregated_stats["assistant_messages"],
+            "jsonl_lines": aggregated_stats["jsonl_lines"],
+            "raw_transcript_bytes": raw_bytes,
+        },
+        "artifacts": {
+            "raw_transcript": "raw-transcript.jsonl",
+            "primary_jsonl": f"{primary_session_id}.jsonl",
+            "raw_transcript_sha256": raw_sha256,
+        },
+        "relationships": {},
+        "auto_generated": {
+            "title": title,
+            "purpose": purpose or "",
+            "tags": tags or [],
+        },
+        "three_ps": three_ps or {
+            "prompt_summary": "",
+            "process_summary": "",
+            "provenance_summary": "",
+        },
+        "plan_files": [],
+        "archive": {
+            "directory_name": directory_name,
+            "archived_at": datetime.now().isoformat(),
+            "needs_review": needs_review,
+            "trivial": trivial,
+            "stitched": True,
+        },
+        "_constituent_sessions": [
+            {"id": sid, "rank": rank}
+            for rank, (sid, _started) in enumerate(constituents, start=1)
+        ],
+    }
+
+
 def create_session_metadata(
     session_id: str,
     transcript_path: Path,

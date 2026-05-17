@@ -142,27 +142,56 @@ class TestBulkCommand:
 
 
 class TestBulkClustersDispatch:
-    """Phase 2: bulk groups unarchived sessions by (project, customTitle) and
-    dispatches singletons to archive() while multi-session clusters trip a
-    Phase-3 NotImplementedError stub."""
+    """auto-stitch: bulk groups unarchived sessions by (project, customTitle)
+    and dispatches singletons to archive() while multi-session clusters dispatch
+    to stitch_cluster() — one cluster directory, every constituent UUID in
+    manifest, archive.stitched=true in meta."""
 
     @staticmethod
-    def _write_session_jsonl(path: Path, custom_title: str | None) -> None:
-        entry: dict = {
-            "type": "user",
-            "message": {"role": "user", "content": "hi"},
-        }
+    def _write_session_jsonl(
+        path: Path,
+        custom_title: str | None,
+        *,
+        started_at: str = "2026-05-01T10:00:00Z",
+        ended_at: str = "2026-05-01T11:00:00Z",
+    ) -> None:
+        entries: list[dict] = [
+            {
+                "type": "user",
+                "timestamp": started_at,
+                "message": {"role": "user", "content": "hi"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": ended_at,
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            },
+        ]
         if custom_title is not None:
-            entry["customTitle"] = custom_title
-        path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+            for entry in entries:
+                entry["customTitle"] = custom_title
+        path.write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8"
+        )
 
-    def test_cluster_of_two_raises_notimplemented(self, temp_dir, monkeypatch):
-        """Phase 2: a cluster of ≥2 same-customTitle sessions raises
-        NotImplementedError naming stitch_cluster — Phase 3 wires this up."""
+    def test_cluster_of_two_stitches_into_one_directory(self, temp_dir, monkeypatch):
+        """Phase 3: a cluster of ≥2 same-customTitle sessions produces ONE
+        stitched archive directory (not two singletons), with both UUIDs fanned
+        into the manifest pointing at it and archive.stitched=true."""
         a = temp_dir / "uuid-aaa.jsonl"
         b = temp_dir / "uuid-bbb.jsonl"
-        self._write_session_jsonl(a, "shared-feat")
-        self._write_session_jsonl(b, "shared-feat")
+        self._write_session_jsonl(
+            a, "shared-feat",
+            started_at="2026-04-24T10:00:00Z", ended_at="2026-04-24T11:00:00Z",
+        )
+        self._write_session_jsonl(
+            b, "shared-feat",
+            started_at="2026-05-16T10:00:00Z", ended_at="2026-05-16T11:00:00Z",
+        )
 
         archive_dir = temp_dir / "ai_transcripts"
         monkeypatch.setattr(
@@ -188,10 +217,27 @@ class TestBulkClustersDispatch:
 
         runner = CliRunner()
         result = runner.invoke(app, ["bulk", "--local"])
-        assert result.exit_code != 0
-        assert isinstance(result.exception, NotImplementedError)
-        assert "stitch_cluster" in str(result.exception)
-        assert "Phase 3" in str(result.exception)
+        assert result.exit_code == 0, result.output
+        assert "stitched" in result.output
+
+        # One cluster directory exists, named with -stitched suffix
+        stitched_dirs = [
+            d for d in archive_dir.iterdir() if d.is_dir() and d.name.endswith("-stitched")
+        ]
+        assert len(stitched_dirs) == 1
+        cluster_dir = stitched_dirs[0]
+
+        # Manifest fans both UUIDs into the cluster
+        manifest = json.loads(
+            (archive_dir / ".session_manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["uuid-aaa"] == str(cluster_dir)
+        assert manifest["uuid-bbb"] == str(cluster_dir)
+
+        # Stitched schema marker is present
+        meta = json.loads((cluster_dir / "session.meta.json").read_text(encoding="utf-8"))
+        assert meta["archive"]["stitched"] is True
+        assert len(meta["_constituent_sessions"]) == 2
 
     def test_singletons_still_archive_normally(self, temp_dir, monkeypatch):
         """Phase 2: sessions with distinct customTitles cluster as singletons
