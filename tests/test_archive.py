@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive.archive import (
     archive,
     find_duplicates,
@@ -671,7 +672,7 @@ class TestManifestPointerProtection:
         )
 
         # Manifest still points at the curated dir, not at any new one.
-        manifest = json.loads((archive_dir / ".session_manifest.json").read_text())
+        manifest = _catalog.load_manifest(archive_dir)
         assert manifest["ssss-1111-2222-3333-4444"] == str(curated)
 
         # Return value is the preserved curated dir, not a fresh one.

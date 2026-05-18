@@ -250,9 +250,7 @@ class TestCLIStitch:
             capture_output=True, text=True, check=True, cwd=str(temp_dir),
         )
         archive_dir = temp_dir / "ai_transcripts"
-        manifest = json.loads(
-            (archive_dir / ".session_manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = catalog.load_manifest(archive_dir)
         return Path(manifest[session_id])
 
     def test_stitch_help(self):

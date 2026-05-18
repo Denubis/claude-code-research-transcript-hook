@@ -14,18 +14,47 @@ def get_manifest_path(archive_dir: Path) -> Path:
     return archive_dir / ".session_manifest.json"
 
 
+def _to_portable(value: str, archive_dir: Path) -> str:
+    """Relativise to archive_dir for portable on-disk storage.
+
+    Paths under archive_dir are stored relative so a committed ai_transcripts/
+    rebuilds correctly when cloned to a different machine. Paths elsewhere
+    (or already relative) are preserved as-is.
+    """
+    if not Path(value).is_absolute():
+        return value
+    try:
+        return str(Path(value).resolve().relative_to(archive_dir.resolve()))
+    except ValueError:
+        return value
+
+
+def _from_portable(value: str, archive_dir: Path) -> str:
+    """Resolve a stored manifest value back to an absolute path.
+
+    Callers expect absolute paths. Relative values were written by save_manifest
+    on this or a peer machine; absolute values are either legacy or external.
+    """
+    return value if Path(value).is_absolute() else str(archive_dir / value)
+
+
 def load_manifest(archive_dir: Path) -> dict:
-    """Load session -> directory mapping."""
+    """Load session -> directory mapping. Returns absolute paths."""
     manifest_path = get_manifest_path(archive_dir)
     if manifest_path.exists():
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return {sid: _from_portable(path, archive_dir) for sid, path in raw.items()}
     return {}
 
 
 def save_manifest(archive_dir: Path, manifest: dict):
-    """Save session -> directory mapping."""
+    """Save session -> directory mapping. Paths under archive_dir become
+    relative on disk so a committed archive is portable across machines."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    get_manifest_path(archive_dir).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    portable = {sid: _to_portable(path, archive_dir) for sid, path in manifest.items()}
+    get_manifest_path(archive_dir).write_text(
+        json.dumps(portable, indent=2), encoding="utf-8"
+    )
 
 
 def get_catalog_path(archive_dir: Path) -> Path:
@@ -33,12 +62,27 @@ def get_catalog_path(archive_dir: Path) -> Path:
     return archive_dir / "CATALOG.json"
 
 
+def _normalise_session_entry(entry: dict) -> dict:
+    """Canonicalise a catalog session entry on 'id'.
+
+    Earlier versions of rebuild_indexes wrote 'session_id'; update_catalog
+    writes 'id'. Normalise on load so readers see one schema.
+    """
+    if "id" not in entry and "session_id" in entry:
+        entry["id"] = entry["session_id"]
+    return entry
+
+
 def load_catalog(archive_dir: Path) -> dict:
     """Load CATALOG.json or create empty structure."""
     catalog_path = get_catalog_path(archive_dir)
     if catalog_path.exists():
         try:
-            return json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            catalog["sessions"] = [
+                _normalise_session_entry(s) for s in catalog.get("sessions", [])
+            ]
+            return catalog
         except json.JSONDecodeError:
             pass
     return {
@@ -62,24 +106,43 @@ def save_catalog(archive_dir: Path, catalog: dict):
     get_catalog_path(archive_dir).write_text(json.dumps(catalog, indent=2), encoding="utf-8")
 
 
+def _build_catalog_entry(session_metadata: dict, *, directory_fallback: str = "") -> dict:
+    """Construct a catalog session entry from a session.meta.json dict.
+
+    Shared between update_catalog (hook fires) and rebuild_indexes (manual
+    regeneration) so they cannot drift. 'id' is canonical; rebuild used to
+    write 'session_id' which broke update_catalog at catalog.py:82.
+    """
+    session = session_metadata.get("session", {})
+    auto = session_metadata.get("auto_generated", {})
+    archive = session_metadata.get("archive", {})
+    return {
+        "id": session.get("id"),
+        "directory": archive.get("directory_name", directory_fallback),
+        "title": auto.get("title", "Untitled"),
+        "purpose": auto.get("purpose", ""),
+        "started_at": session.get("started_at"),
+        "duration_minutes": session.get("duration_minutes"),
+        "tags": auto.get("tags", []),
+        "needs_review": archive.get("needs_review", True),
+        "trivial": archive.get("trivial", False),
+    }
+
+
 def update_catalog(archive_dir: Path, session_metadata: dict):
     """Update CATALOG.json with new/updated session entry."""
     catalog = load_catalog(archive_dir)
 
     session_id = session_metadata["session"]["id"]
-    new_entry = {
-        "id": session_id,
-        "directory": session_metadata["archive"]["directory_name"],
-        "title": session_metadata["auto_generated"]["title"],
-        "purpose": session_metadata["auto_generated"]["purpose"],
-        "started_at": session_metadata["session"]["started_at"],
-        "duration_minutes": session_metadata["session"]["duration_minutes"],
-        "tags": session_metadata["auto_generated"].get("tags", []),
-        "needs_review": session_metadata["archive"]["needs_review"],
-    }
+    new_entry = _build_catalog_entry(session_metadata)
 
-    # Update existing or append new
-    existing_ids = {s["id"]: i for i, s in enumerate(catalog["sessions"])}
+    # Update existing or append new. Tolerate legacy entries from
+    # rebuild_indexes that keyed under "session_id" — see archive.py:680.
+    existing_ids: dict[str, int] = {}
+    for i, s in enumerate(catalog["sessions"]):
+        key = s.get("id") or s.get("session_id")
+        if key is not None:
+            existing_ids[key] = i
     if session_id in existing_ids:
         catalog["sessions"][existing_ids[session_id]] = new_entry
     else:
@@ -114,21 +177,13 @@ def rebuild_indexes(archive_dir: Path) -> int:
         if not session_id:
             continue
 
-        archive_info = metadata.get("archive", {})
-        directory_name = archive_info.get("directory_name", sidecar_path.parent.name)
-
         # Build manifest entry
         manifest[session_id] = str(sidecar_path.parent)
 
-        # Build catalog session entry
-        sessions.append({
-            "session_id": session_id,
-            "title": metadata.get("auto_generated", {}).get("title", "Untitled"),
-            "started_at": metadata.get("session", {}).get("started_at"),
-            "directory": directory_name,
-            "needs_review": archive_info.get("needs_review", True),
-            "trivial": archive_info.get("trivial", False),
-        })
+        # Build catalog session entry — shared shape with update_catalog
+        sessions.append(
+            _build_catalog_entry(metadata, directory_fallback=sidecar_path.parent.name)
+        )
 
     # Save manifest
     save_manifest(archive_dir, manifest)

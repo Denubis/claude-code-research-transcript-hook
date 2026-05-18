@@ -5,6 +5,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from claude_transcript_archive import catalog as _catalog
 from claude_transcript_archive.cli import app
 
 
@@ -228,9 +229,7 @@ class TestBulkClustersDispatch:
         cluster_dir = stitched_dirs[0]
 
         # Manifest fans both UUIDs into the cluster
-        manifest = json.loads(
-            (archive_dir / ".session_manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = _catalog.load_manifest(archive_dir)
         assert manifest["uuid-aaa"] == str(cluster_dir)
         assert manifest["uuid-bbb"] == str(cluster_dir)
 
