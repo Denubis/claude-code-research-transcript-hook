@@ -1,5 +1,13 @@
 # Changelog
 
+## transcript-archive 0.7.3
+
+`clean`'s legacy migration no longer misreports DVC-archived sessions.
+
+**Fixed:**
+- `migrate_legacy()` skips any directory with a sibling `.dvc` pointer: such directories are DVC-archived in place, not legacy, and moving one would orphan its pointer. Found via MELICA's `target: "here"` config, where `clean --dry-run` reported all 137 DVC-managed sessions as pending migration (MELICA-AU/archive-digitalisation#57).
+- `migrate_legacy(dry_run=True)` now applies the same existing-destination skip as execute, so dry-run reports exactly what execute would do. Previously it reported every candidate, including directories the execute branch would skip — with `target: "here"` (source and destination the same directory), that meant every archived session, every time.
+
 ## transcript-archive 0.6.0
 
 `status` now lists the work it found, and generated archive files are pre-commit-clean on write.
