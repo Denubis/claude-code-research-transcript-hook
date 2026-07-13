@@ -335,13 +335,18 @@ def migrate_legacy(legacy_dir: Path, target_dir: Path, *, dry_run: bool = True) 
 
     migrated = []
     for item in sorted(legacy_dir.iterdir()):
-        if item.is_dir() and (item / "session.meta.json").exists():
-            dest = target_dir / item.name
-            if dry_run:
-                migrated.append(item.name)
-            elif not dest.exists():
-                shutil.move(str(item), str(dest))
-                migrated.append(item.name)
+        if not (item.is_dir() and (item / "session.meta.json").exists()):
+            continue
+        # A sibling .dvc pointer means the directory is DVC-archived in
+        # place, not legacy: moving it would orphan the pointer.
+        if (item.parent / (item.name + ".dvc")).exists():
+            continue
+        dest = target_dir / item.name
+        if dest.exists():
+            continue
+        if not dry_run:
+            shutil.move(str(item), str(dest))
+        migrated.append(item.name)
     return migrated
 
 

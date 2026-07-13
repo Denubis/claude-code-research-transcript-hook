@@ -1028,3 +1028,46 @@ class TestMigrateLegacy:
 
     def test_nonexistent_legacy_dir(self, temp_dir):
         assert migrate_legacy(temp_dir / "nope", temp_dir / "target", dry_run=True) == []
+
+    def test_skips_dirs_with_sibling_dvc_pointer(self, temp_dir):
+        """A directory with a sibling .dvc pointer is DVC-archived, not legacy."""
+        legacy = temp_dir / "ai_transcripts"
+        legacy.mkdir()
+        target = temp_dir / ".ai-transcripts"
+        target.mkdir()
+
+        d = legacy / "2024-01-01-dvc-session"
+        d.mkdir()
+        (d / "session.meta.json").write_text('{"session": {"id": "dvc"}}')
+        (legacy / "2024-01-01-dvc-session.dvc").write_text("outs:\n- path: 2024-01-01-dvc-session\n")
+
+        assert migrate_legacy(legacy, target, dry_run=True) == []
+        assert migrate_legacy(legacy, target, dry_run=False) == []
+        assert (legacy / "2024-01-01-dvc-session").exists()  # never moved
+
+    def test_dry_run_skips_existing_destination(self, temp_dir):
+        """Dry run reports what execute would do: nothing, when dest exists."""
+        legacy = temp_dir / "ai_transcripts"
+        legacy.mkdir()
+        target = temp_dir / ".ai-transcripts"
+        target.mkdir()
+
+        d = legacy / "2024-01-01-old-session"
+        d.mkdir()
+        (d / "session.meta.json").write_text('{"session": {"id": "old"}}')
+        (target / "2024-01-01-old-session").mkdir()  # already migrated
+
+        assert migrate_legacy(legacy, target, dry_run=True) == []
+
+    def test_source_equals_target_reports_nothing(self, temp_dir):
+        """target: "here" config — legacy and target are the same directory."""
+        here = temp_dir / "ai_transcripts"
+        here.mkdir()
+
+        d = here / "2024-01-01-in-place-session"
+        d.mkdir()
+        (d / "session.meta.json").write_text('{"session": {"id": "here"}}')
+
+        assert migrate_legacy(here, here, dry_run=True) == []
+        assert migrate_legacy(here, here, dry_run=False) == []
+        assert (here / "2024-01-01-in-place-session").exists()
