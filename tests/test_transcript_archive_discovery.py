@@ -366,6 +366,62 @@ def test_claude_sidechain_shards_attach_to_canonical_parent_without_parsing(
     assert result.sources[0].sidechain_shards == (shard,)
 
 
+def test_cached_claude_workflow_shard_attaches_to_parent_session(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "brian-ed3d-plugins"
+    repository.mkdir()
+    common_dir = tmp_path / "common.git"
+    claude_root = tmp_path / "claude"
+    parent = claude_root / "project" / "parent-session.jsonl"
+    shard = (
+        claude_root
+        / "project"
+        / "parent-session"
+        / "subagents"
+        / "workflows"
+        / "wf-example"
+        / "agent-worker.jsonl"
+    )
+    _write_jsonl(
+        parent,
+        {
+            "type": "user",
+            "sessionId": "parent-session",
+            "cwd": str(repository),
+            "message": {"content": "human"},
+        },
+    )
+    _write_jsonl(
+        shard,
+        {
+            "type": "assistant",
+            "sessionId": "parent-session",
+            "cwd": str(repository),
+            "isSidechain": True,
+            "agentId": "worker",
+            "message": {"content": [{"type": "text", "text": "subagent"}]},
+        },
+    )
+
+    result = discover_sessions_cached(
+        RepositoryIdentity(
+            root=repository,
+            common_git_dir=common_dir,
+            worktrees=(repository,),
+            normalized_remotes=(),
+        ),
+        resolver=_Resolver({repository: common_dir}),
+        claude_root=claude_root,
+        codex_root=tmp_path / "codex",
+        cache_path=tmp_path / "archive" / ".discovery.json",
+    )
+
+    assert len(result.sources) == 1
+    assert result.sources[0].session_id == "parent-session"
+    assert result.sources[0].sidechain_shards == (shard,)
+
+
 def test_codex_matching_remote_in_sibling_clone_is_reported_and_excluded(
     tmp_path: Path,
 ) -> None:

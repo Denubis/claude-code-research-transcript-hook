@@ -344,6 +344,40 @@ def test_claude_keeps_mid_message_envelope_quote_as_user() -> None:
     assert turn.harness_identification is None
 
 
+def test_claude_keeps_text_and_records_image_omission() -> None:
+    record = _raw(
+        7,
+        {
+            "type": "user",
+            "sessionId": "claude-session",
+            "uuid": "user-7",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect this image."},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "not-archived",
+                        },
+                    },
+                ],
+            },
+        },
+    )
+
+    session = adapt_claude_records(
+        (record,),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert _turns(session.events)[0].text_blocks == ("Please inspect this image.",)
+    assert _omission_counts(session.events) == {"image": 1}
+
+
 def test_claude_rejects_unknown_conversation_content() -> None:
     record = _raw(
         7,
@@ -601,6 +635,49 @@ def test_codex_rejects_unknown_conversation_shape() -> None:
             session_id="codex-session",
             source_path=Path("/source/rollout.jsonl"),
         )
+
+
+def test_codex_keeps_text_and_records_image_omission() -> None:
+    records = (
+        _raw(
+            1,
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-session",
+                    "session_id": "codex-session",
+                    "cwd": "/repo",
+                },
+            },
+        ),
+        _raw(
+            2,
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Please inspect this image."},
+                        {
+                            "type": "input_image",
+                            "detail": "auto",
+                            "image_url": "data:image/png;base64,not-archived",
+                        },
+                    ],
+                },
+            },
+        ),
+    )
+
+    session = adapt_codex_records(
+        records,
+        session_id="codex-session",
+        source_path=Path("/source/rollout.jsonl"),
+    )
+
+    assert _turns(session.events)[0].text_blocks == ("Please inspect this image.",)
+    assert _omission_counts(session.events) == {"image": 1}
 
 
 def test_codex_counts_invented_record_type_as_unrecognised() -> None:

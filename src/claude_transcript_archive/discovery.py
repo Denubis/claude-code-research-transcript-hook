@@ -452,14 +452,16 @@ def _jsonl_files(root: Path) -> tuple[Path, ...]:
 
 
 def _claude_session_files(root: Path) -> tuple[Path, ...]:
-    return tuple(path for path in _jsonl_files(root) if path.parent.name != "subagents")
+    return tuple(
+        path for path in _jsonl_files(root) if "subagents" not in path.relative_to(root).parts
+    )
 
 
 def _claude_sidechain_shards(parent: Path) -> tuple[Path, ...]:
     shard_directory = parent.parent / parent.stem / "subagents"
     if not shard_directory.is_dir():
         return ()
-    return tuple(sorted(shard_directory.glob("agent-*.jsonl")))
+    return tuple(sorted(shard_directory.rglob("agent-*.jsonl")))
 
 
 def discover_sessions(

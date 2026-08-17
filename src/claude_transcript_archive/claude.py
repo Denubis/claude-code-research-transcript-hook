@@ -23,6 +23,7 @@ from .model import (
 )
 
 _TEXT_BLOCK = "text"
+_IMAGE_BLOCK = "image"
 _THINKING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
 _TOOL_CALL_BLOCKS = frozenset({"tool_use", "server_tool_use"})
 _TOOL_OUTPUT_BLOCKS = frozenset({"tool_result", "advisor_tool_result"})
@@ -212,6 +213,17 @@ def _adapt_block(
         if not isinstance(block_text, str):
             _unknown_block(record, session_id, "text-without-string")
         return block_text, None, None
+    if block_type == _IMAGE_BLOCK:
+        return (
+            None,
+            None,
+            _omission(
+                record,
+                session_id,
+                "image",
+                "Image content is not archived",
+            ),
+        )
     if block_type in _THINKING_BLOCKS:
         return (
             None,

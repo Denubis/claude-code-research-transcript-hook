@@ -213,23 +213,34 @@ def _message_text(
     record: RawRecord,
     session_id: str,
     payload: dict[str, object],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], list[Omission]]:
     content = payload.get("content")
     if not isinstance(content, list):
         _unknown_response(record, session_id, "message-without-content")
     text: list[str] = []
+    omissions: list[Omission] = []
     for block in cast("list[object]", content):
         if not isinstance(block, dict):
             _unknown_response(record, session_id, type(block).__name__)
         block_value = cast("dict[str, object]", block)
         block_type = block_value.get("type")
+        if block_type == "input_image":
+            omissions.append(
+                _omission(
+                    record,
+                    session_id,
+                    "image",
+                    "Image content is not archived",
+                )
+            )
+            continue
         if block_type not in {"input_text", "output_text"}:
             _unknown_response(record, session_id, block_type)
         value = block_value.get("text")
         if not isinstance(value, str):
             _unknown_response(record, session_id, "text-without-string")
         text.append(value)
-    return tuple(text)
+    return tuple(text), omissions
 
 
 def _leading_harness_envelope(text_blocks: tuple[str, ...]) -> str | None:
@@ -269,16 +280,19 @@ def _adapt_message(
 ) -> list[TranscriptEvent]:
     role = payload.get("role")
     if role in {"user", "assistant"}:
-        text = _message_text(record, session_id, payload)
+        text, omissions = _message_text(record, session_id, payload)
         if not text:
-            return [
-                _omission(
-                    record,
-                    session_id,
-                    "operational",
-                    "Empty dialogue record has no visible text",
+            events: list[TranscriptEvent] = [*omissions]
+            if not events:
+                events.append(
+                    _omission(
+                        record,
+                        session_id,
+                        "operational",
+                        "Empty dialogue record has no visible text",
+                    )
                 )
-            ]
+            return events
         if role == "user" and _is_session_opener(text):
             return [
                 _omission(
@@ -286,12 +300,13 @@ def _adapt_message(
                     session_id,
                     "session-opener",
                     "Session-opening harness context was not displayed",
-                )
+                ),
+                *omissions,
             ]
         harness_envelope = _leading_harness_envelope(text) if role == "user" else None
         if harness_envelope in _HIDDEN_HARNESS_ENVELOPES:
             category, reason = _HIDDEN_HARNESS_ENVELOPES[harness_envelope]
-            return [_omission(record, session_id, category, reason)]
+            return [_omission(record, session_id, category, reason), *omissions]
         dialogue_role = "user" if role == "user" else "assistant"
         return [
             Turn(
@@ -304,7 +319,8 @@ def _adapt_message(
                 harness_identification=(
                     "leading-envelope" if harness_envelope in _VISIBLE_HARNESS_ENVELOPES else None
                 ),
-            )
+            ),
+            *omissions,
         ]
     if role == "developer":
         return [

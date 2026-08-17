@@ -776,12 +776,17 @@ def _run_generate(options: argparse.Namespace) -> int:
             ),
         )
     redactions_path = options.redactions or archive_root / "redactions.toml"
+    rules = (
+        ()
+        if options.redactions is None and not redactions_path.exists()
+        else _load_rules(redactions_path)
+    )
     result = generate_sources(
         discovery.sources,
         archive_root=archive_root,
         state_path=archive_root
         / (".state.json" if options.source == "all" else f".state-{options.source}.json"),
-        rules=_load_rules(redactions_path),
+        rules=rules,
         scanner=scanner,
     )
     sys.stdout.write(format_discovery_exclusions(discovery.exclusions))

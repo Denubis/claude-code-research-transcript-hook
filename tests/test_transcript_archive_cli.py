@@ -622,7 +622,7 @@ def test_cli_fails_loudly_and_names_missing_source_store_roots(
     assert "discovered=0" not in captured.out
 
 
-def test_cli_accepts_present_but_empty_source_stores(
+def test_cli_accepts_fresh_archive_and_present_empty_source_stores(
     tmp_path: Path,
     capsys,
     monkeypatch,
@@ -630,11 +630,9 @@ def test_cli_accepts_present_but_empty_source_stores(
     repository = tmp_path / "repository"
     claude_root = tmp_path / "claude"
     codex_root = tmp_path / "codex"
-    redactions = tmp_path / "redactions.toml"
     repository.mkdir()
     claude_root.mkdir()
     codex_root.mkdir()
-    redactions.write_text("", encoding="utf-8")
     identity = RepositoryIdentity(
         root=repository,
         common_git_dir=tmp_path / ".git",
@@ -667,8 +665,6 @@ def test_cli_accepts_present_but_empty_source_stores(
             str(codex_root),
             "--archive-root",
             str(tmp_path / "archive"),
-            "--redactions",
-            str(redactions),
             "--gitleaks",
             "/bin/true",
         ]
