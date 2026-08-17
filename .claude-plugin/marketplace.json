@@ -5,20 +5,20 @@
     "email": "brian.ballsun-stanton@mq.edu.au"
   },
   "metadata": {
-    "description": "Archive Claude Code conversations with research-grade metadata using the IDW2025 reproducibility framework"
+    "description": "Archive Claude Code and Codex sessions as searchable Markdown with Three-Ps metadata"
   },
   "plugins": [
     {
       "name": "transcript-archive",
       "source": "./",
-      "description": "Archive Claude Code conversations with research-grade metadata (IDW2025 framework) - generates HTML, markdown, and PDF exports",
-      "version": "0.7.2",
+      "description": "Archive Claude Code and Codex sessions as searchable Markdown with Three-Ps metadata",
+      "version": "1.0.0",
       "author": {
         "name": "Brian Ballsun-Stanton",
         "email": "brian.ballsun-stanton@mq.edu.au"
       },
       "license": "MIT",
-      "keywords": ["research", "transcript", "archive", "idw2025", "reproducibility", "pdf", "markdown"],
+      "keywords": ["research", "transcript", "archive", "claude", "codex", "reproducibility", "markdown"],
       "category": "research"
     }
   ]

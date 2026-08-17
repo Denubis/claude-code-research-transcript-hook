@@ -1,0 +1,7 @@
+interface:
+  display_name: "Transcript Archive"
+  short_description: "Archive searchable Claude and Codex transcripts"
+  default_prompt: "Use $transcript to archive this session with reviewed Three-Ps metadata."
+
+policy:
+  allow_implicit_invocation: true

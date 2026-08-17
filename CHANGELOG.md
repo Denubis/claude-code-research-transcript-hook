@@ -1,5 +1,26 @@
 # Changelog
 
+## transcript-archive 1.0.0
+
+Breaking replacement of the ornate Claude-only export pipeline with a
+provider-neutral, repository-local Markdown archive.
+
+**Changed:**
+- Claude Code and Codex parent sessions now share one neutral discovery,
+  adaptation, redaction, rendering, and incremental-generation contract.
+- Each parent session produces exactly one searchable `transcript.md` with
+  Three-Ps frontmatter and explicit source, omission, and redaction evidence.
+- Subagent files are validated and counted but never rendered as parent dialogue.
+- The CLI is now the `generate` and `update` boundary; updates accept a structured
+  JSON metadata file so agents do not interpolate authored prose into Bash.
+- Claude Code, Codex, and Antigravity plugin adapters expose the same transcript
+  skill.
+
+**Removed:**
+- HTML and PDF exports, raw JSONL copies, summaries, catalogues, metadata
+  sidecars, stitching, and the old seven-command management interface.
+- Runtime dependencies on `claude-code-transcripts` and Typer.
+
 ## transcript-archive 0.7.3
 
 `clean`'s legacy migration no longer misreports DVC-archived sessions.

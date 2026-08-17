@@ -2,8 +2,12 @@
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "claude-research-transcript archive --local --quiet"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-research-transcript generate --repo . --source claude"
+          }
+        ]
       }
     ]
   }

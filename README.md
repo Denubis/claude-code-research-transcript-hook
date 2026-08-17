@@ -1,150 +1,91 @@
-# claude-code-research-transcript-hook
+# Claude Code and Codex Transcript Archive
 
-Archive [Claude Code](https://docs.anthropic.com/en/docs/claude-code) conversations with research-grade metadata using the **IDW2025 reproducibility framework**.
+Archive AI coding sessions as deterministic, searchable Markdown with reviewed
+Prompt, Process, and Provenance metadata.
 
-## Features
+The archive is repository-local. Discovery includes Claude Code and Codex parent
+sessions that can be tied to the current Git repository, including deleted
+worktrees when repository evidence can recover their membership.
 
-- **Research-grade metadata**: Captures the Three Ps (Prompt/Process/Provenance) for reproducibility
-- **Rich statistics**: Token counts, costs, tool usage, thinking blocks, artifacts
-- **Dual archive modes**: Global (`~/.claude/transcripts/`) or per-project (`./ai_transcripts/`)
-- **CATALOG.json**: Central index of all sessions with metadata completion status
-- **Plan file archiving**: Automatically captures plan files from planning sessions
-- **Interactive `/transcript` command**: Asks clarifying questions to capture context
-- **Silent auto-archive**: Hook-based archiving with automatic metadata extraction
-- **HTML output**: Browsable transcripts via [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts)
+## Output contract
 
-## Installation
-
-### As a Claude Code plugin (recommended)
-
-```bash
-/plugin marketplace add Denubis/claude-code-research-transcript-hook
-/plugin install transcript-archive@transcript-archive-marketplace
-```
-
-This installs the `/transcript` command and the transcript archive skill automatically.
-
-### CLI tool only
-
-```bash
-# Global install (for hooks)
-uv tool install git+https://github.com/Denubis/claude-code-research-transcript-hook
-
-# Per-repo with uvx
-uvx --from git+https://github.com/Denubis/claude-code-research-transcript-hook claude-research-transcript archive --local
-
-# Using pipx
-pipx install git+https://github.com/Denubis/claude-code-research-transcript-hook
-
-# From source
-git clone https://github.com/Denubis/claude-code-research-transcript-hook
-cd claude-code-research-transcript-hook
-uv tool install .
-```
-
-## Setup
-
-### Enable auto-archive for a project (optional)
-
-To automatically archive transcripts when Claude stops, copy the example hook to your project:
-
-```bash
-cp example-hooks/settings.local.json /path/to/your/project/.claude/
-```
-
-This archives to `./ai_transcripts/` in the project directory. Sessions archived via hooks are flagged as `needs_review: true` for later metadata completion.
-
-## Usage
-
-### Interactive archiving with `/transcript`
-
-In any Claude Code session, run:
+Each parent session produces exactly one file:
 
 ```text
-/transcript
+ai_transcripts/sessions/<claude|codex>/<session-id>/transcript.md
 ```
 
-Claude will:
+The Markdown frontmatter records source identity, repository evidence, the Three
+Ps, and whether those summaries still need human review. The body contains the
+human/main-agent dialogue, concise visible tool reports, context boundaries, and
+an explicit omission/redaction ledger.
 
-1. Analyze the conversation and draft metadata
-2. Ask clarifying questions about context that won't be obvious in 6 months
-3. Present the Three Ps (Prompt/Process/Provenance) for your confirmation
-4. Archive with complete metadata
+Subagent transcripts are validated and counted but are not copied into the
+dialogue. Private reasoning, raw JSONL, HTML, PDFs, and metadata sidecars are not
+archived. The provider's local JSONL remains the source of record named in the
+Markdown frontmatter.
 
-### Command-line options
+## Install
 
-```text
-claude-research-transcript <subcommand> [OPTIONS]
+Install or refresh the CLI with uv:
 
-Subcommands:
-  archive      Archive a single session (what Stop hooks call)
-  init         Initialize transcript archiving for a repo
-  status       Report archived / needs-review / unarchived counts
-  bulk         Archive every unarchived session
-  update       Edit metadata on an existing archive
-  regenerate   Re-render HTML/PDF/markdown from the raw backup
-  clean        Deduplicate, migrate legacy, repair indexes
-
-Common `archive` options:
-  --title TITLE    Title for the transcript
-  --retitle        Force regenerate title/rename directory
-  --force          Regenerate even if transcript unchanged
-  --local          Archive to ./ai_transcripts/ instead of ~/.claude/transcripts/
-  --output DIR     Custom output directory
-  --quiet          Suppress error messages
-
-Input: JSON payload on stdin with transcript_path and session_id
-       (automatically provided by Claude Code Stop hooks)
+```bash
+uv tool install --force git+https://github.com/Denubis/claude-code-research-transcript-hook
 ```
 
-### Archive locations
+The repository also provides the same `transcript` skill for Claude Code, Codex,
+and Antigravity through their native plugin manifests.
 
-- **Global archive** (default): `~/.claude/transcripts/{project-path}/`
-- **Project archive** (`--local`): `./ai_transcripts/`
-- **Custom** (`--output`): Any directory you specify
+## Generate transcripts
 
-## Archive Structure
+From the repository being archived:
 
-```text
-~/.claude/transcripts/                          # Global archive
-├── CATALOG.json                                # Central index
-└── -home-user-my-project/                      # Project (CC path encoding)
-    ├── CATALOG.json                            # Project index
-    └── 2026-01-14-implementing-feature/
-        ├── index.html                          # Browsable transcript
-        ├── session.meta.json                   # Rich metadata
-        ├── raw-transcript.jsonl                # Original transcript
-        └── plans/                              # Plan files (if any)
-            └── plan-file.md
+```bash
+claude-research-transcript generate --repo . --source all
 ```
 
-## Metadata Schema (session.meta.json)
+Use `--source claude` or `--source codex` on a machine that only has one provider
+store. Generation is incremental; unchanged source sessions are skipped.
 
-Each archived session includes:
+Gitleaks is required and resolved from `--gitleaks`, `GITLEAKS`, `PATH`, or the
+configured pre-commit environment. Generation fails closed if no scanner is
+available or a rendered candidate contains a secret finding.
 
-- **Session info**: ID, timestamps, duration
-- **Project info**: Name, directory
-- **Model info**: Provider, model ID
-- **Statistics**: Turns, messages, tokens, costs, tool calls, thinking blocks
-- **Artifacts**: Files created, modified, referenced
-- **Relationships**: Session continuations, references
-- **Three Ps**: Prompt summary, process summary, provenance summary
-- **Archive info**: Timestamp, file hash, needs_review flag
+## Review the Three Ps
 
-## The IDW2025 Framework
+Create a JSON file through a structured file-edit tool, not shell interpolation:
 
-This tool implements the **Three Ps** framework for research reproducibility:
+```json
+{
+  "prompt": "What the user needed",
+  "process": "How the session approached it",
+  "provenance": "Why this session matters in the wider work"
+}
+```
 
-- **Prompt**: What was the user trying to accomplish? What problem were they solving?
-- **Process**: How was Claude Code used? What tools and approaches were employed?
-- **Provenance**: What is the role of this work in the broader research context?
+Then update the one archived parent session:
 
-Sessions archived via hooks are marked `needs_review: true`. Run `/transcript` to complete the metadata with human-verified context.
+```bash
+claude-research-transcript update \
+  --repo . \
+  --tool claude \
+  --session-id <session-id> \
+  --metadata-file <three-ps.json>
+```
 
-## Requirements
+Direct `--prompt`, `--process`, and `--provenance` options remain available for
+trusted manual invocations. Supplying all three non-empty values changes
+`needs_review` to `false`.
 
-- Python 3.12+
-- [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) (installed automatically)
+## Development
+
+```bash
+uv run --frozen --extra dev pytest
+uv run --frozen --extra dev ruff check .
+uv run --frozen --extra dev ty check src tests
+```
+
+Python 3.12 or later is required. Runtime code uses the standard library.
 
 ## License
 

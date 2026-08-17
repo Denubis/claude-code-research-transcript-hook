@@ -1,955 +1,799 @@
-#!/usr/bin/env python3
-"""Claude Code transcript archive CLI.
+"""Contributor-facing transcript archive generation.
 
-Typer-based CLI that dispatches to the archive module.
+# pattern: Imperative Shell
 """
 
+import argparse
+import hashlib
 import json
-import shutil
+import os
 import subprocess
 import sys
+import tempfile
+import tomllib
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
 
-import typer
+from .claude import adapt_claude_records, sidechain_shard_omission
+from .codex import adapt_codex_records, subagent_rollout_omission
+from .discovery import (
+    DiscoveryExclusion,
+    DiscoveryResult,
+    GitRepositoryResolver,
+    SourceDescriptor,
+    SourceStamp,
+    discover_sessions_cached,
+    inspect_repository,
+    load_raw_records,
+)
+from .model import ArchiveError, Omission, RawRecord, Session, SourceLocation
+from .redaction import (
+    GitleaksScanner,
+    ProcessResult,
+    ProcessRunner,
+    RedactionRule,
+    SecretFinding,
+    parse_redactions,
+    redact_records,
+)
+from .render import RenderedPart, render_session
+from .scanner_resolution import UnavailableGitleaksScanner, resolve_gitleaks
 
-from claude_transcript_archive import archive as _archive
-from claude_transcript_archive import catalog as _catalog
-from claude_transcript_archive import discovery as _discovery
-from claude_transcript_archive import metadata as _metadata
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
-app = typer.Typer(
-    help="Archive Claude Code transcripts with research-grade metadata",
-    add_completion=False,
+_STATE_VERSION = 3
+
+
+class CandidateScanner(Protocol):
+    """Port for scanning one in-memory rendered candidate."""
+
+    def scan(self, candidate: str) -> tuple[SecretFinding, ...]:
+        """Return redacted finding metadata."""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFailure:
+    """One source session that could not be safely generated."""
+
+    tool: str
+    session_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationResult:
+    """Measured result of one deterministic generation run."""
+
+    discovered: int
+    rendered: int
+    skipped: int
+    bytes_written: int
+    failures: tuple[SourceFailure, ...]
+
+    @property
+    def failed(self) -> int:
+        """Return the number of failed source sessions."""
+        return len(self.failures)
+
+
+@dataclass(frozen=True, slots=True)
+class SubprocessRunner:
+    """Run fixed argument vectors without a shell."""
+
+    def run(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        input_text: str | None = None,
+        timeout_seconds: int,
+    ) -> ProcessResult:
+        """Capture one text process result."""
+        try:
+            result = subprocess.run(
+                arguments,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except FileNotFoundError:
+            return ProcessResult(
+                returncode=127,
+                stdout="",
+                stderr=f"Executable not found: {arguments[0]}",
+            )
+        except subprocess.TimeoutExpired:
+            return ProcessResult(
+                returncode=124,
+                stdout="",
+                stderr=f"Command timed out after {timeout_seconds} seconds",
+            )
+        return ProcessResult(
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+
+def _source_key(source: SourceDescriptor) -> str:
+    return f"{source.tool}:{source.session_id}"
+
+
+def _current_stamp(path: Path) -> SourceStamp:
+    stat = path.stat()
+    return SourceStamp(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+
+def _source_paths(source: SourceDescriptor) -> tuple[Path, ...]:
+    return (source.path, *source.sidechain_shards)
+
+
+def _current_stamps(
+    source: SourceDescriptor,
+) -> tuple[tuple[Path, SourceStamp], ...]:
+    return tuple((path, _current_stamp(path)) for path in _source_paths(source))
+
+
+def _stamp_state(
+    stamps: tuple[tuple[Path, SourceStamp], ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "path": str(path),
+            "size": stamp.size,
+            "mtime_ns": stamp.mtime_ns,
+        }
+        for path, stamp in stamps
+    ]
+
+
+def _rule_fingerprint(
+    rules: tuple[RedactionRule, ...],
+    source: SourceDescriptor,
+) -> str:
+    applicable = [
+        {
+            "tool": rule.tool,
+            "session_id": rule.session_id,
+            "source_order": rule.source_order,
+            "stable_id": rule.stable_id,
+            "json_pointer": rule.json_pointer,
+            "digest": rule.digest,
+            "reason": rule.reason,
+        }
+        for rule in rules
+        if rule.tool == source.tool and rule.session_id == source.session_id
+    ]
+    encoded = json.dumps(
+        applicable,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _empty_state() -> dict[str, object]:
+    return {"version": _STATE_VERSION, "sources": {}}
+
+
+def _load_state(path: Path) -> dict[str, object]:
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _empty_state()
+    if not isinstance(decoded, dict) or decoded.get("version") != _STATE_VERSION:
+        return _empty_state()
+    sources = decoded.get("sources")
+    if not isinstance(sources, dict):
+        return _empty_state()
+    return decoded
+
+
+def _state_sources(state: dict[str, object]) -> dict[str, object]:
+    sources = state.get("sources")
+    return cast("dict[str, object]", sources) if isinstance(sources, dict) else {}
+
+
+def _outputs_exist(entry: dict[str, object], archive_root: Path) -> bool:
+    outputs = entry.get("outputs")
+    return (
+        isinstance(outputs, list)
+        and bool(outputs)
+        and all(isinstance(output, str) and (archive_root / output).is_file() for output in outputs)
+    )
+
+
+def _can_skip(
+    source: SourceDescriptor,
+    stamps: tuple[tuple[Path, SourceStamp], ...],
+    fingerprint: str,
+    entry: object,
+    archive_root: Path,
+) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    entry_value = cast("dict[str, object]", entry)
+    return (
+        entry_value.get("path") == str(source.path)
+        and entry_value.get("inputs") == _stamp_state(stamps)
+        and entry_value.get("redactions") == fingerprint
+        and entry_value.get("recovered_working_directories")
+        == list(source.recovered_working_directories)
+        and _outputs_exist(entry_value, archive_root)
+    )
+
+
+def _adapt(
+    source: SourceDescriptor,
+    records: tuple[RawRecord, ...],
+) -> Session:
+    if source.tool == "claude":
+        return adapt_claude_records(
+            records,
+            session_id=source.session_id,
+            source_path=source.path,
+        )
+    return adapt_codex_records(
+        records,
+        session_id=source.session_id,
+        source_path=source.path,
+    )
+
+
+def _scan_parts(
+    parts: tuple[RenderedPart, ...],
+    scanner: CandidateScanner,
+) -> None:
+    for part in parts:
+        findings = scanner.scan(part.content)
+        if not findings:
+            continue
+        finding = findings[0]
+        location = part.source_for_line(finding.start_line) or SourceLocation(1)
+        raise ArchiveError(
+            f"{part.filename} contains Gitleaks rule {finding.rule_id} at {location.label}"
+        )
+
+
+def _safe_session_directory(
+    archive_root: Path,
+    source: SourceDescriptor,
+) -> Path:
+    session_id = source.session_id
+    if not session_id or session_id in {".", ".."} or Path(session_id).name != session_id:
+        raise ArchiveError(f"Unsafe session ID: {session_id}")
+    return archive_root / "sessions" / source.tool / session_id
+
+
+def _temporary_file(session_directory: Path, content: str) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=session_directory,
+        prefix=".transcript-",
+        suffix=".tmp",
+        delete=False,
+    ) as target:
+        target.write(content)
+        target.flush()
+        os.fsync(target.fileno())
+        return Path(target.name)
+
+
+_THREE_PS_KEYS = (
+    "prompt_summary",
+    "process_summary",
+    "provenance_summary",
 )
 
 
-def _resolve_archive_dir() -> Path:
-    """Resolve the archive directory from git root and project defaults."""
+def _front_matter(content: str) -> tuple[list[str], int]:
+    lines = content.splitlines()
+    if not lines or lines[0] != "---":
+        raise ArchiveError("Transcript is missing opening frontmatter delimiter")
     try:
-        repo_root = Path(
-            subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            ).stdout.strip()
-        )
-    except subprocess.CalledProcessError:
-        repo_root = Path.cwd()
-
-    defaults = _discovery.load_project_defaults(repo_root)
-    target = defaults.get("target", "branch")
-
-    if target == "branch":
-        return repo_root / ".ai-transcripts"
-    return _discovery.get_archive_dir(
-        local=(target == "here"),
-        output=None,
-        project_dir=repo_root,
-    )
+        closing = lines.index("---", 1)
+    except ValueError as error:
+        raise ArchiveError("Transcript is missing closing frontmatter delimiter") from error
+    return lines, closing
 
 
-def _parse_tags(tags: str | None) -> list[str] | None:
-    """Parse comma-separated tags string into a list."""
-    if not tags:
+def _front_matter_value(lines: list[str], closing: int, key: str) -> object | None:
+    prefix = f"{key}:"
+    matches = [
+        line.removeprefix(prefix).strip() for line in lines[1:closing] if line.startswith(prefix)
+    ]
+    if len(matches) > 1:
+        raise ArchiveError(f"Transcript frontmatter repeats {key}")
+    if not matches:
         return None
-    return [t.strip() for t in tags.split(",") if t.strip()]
-
-
-@app.command()
-def archive(
-    title: str | None = typer.Option(None, help="Title to use"),
-    retitle: bool = typer.Option(False, help="Force regenerate title/rename directory"),
-    force: bool = typer.Option(False, help="Regenerate even if transcript unchanged"),
-    local: bool = typer.Option(False, help="Archive to ./ai_transcripts/"),
-    output: str | None = typer.Option(None, help="Custom output directory"),
-    quiet: bool = typer.Option(False, help="Suppress error messages"),
-    transcript: str | None = typer.Option(None, help="Path to transcript file"),
-    session_id: str | None = typer.Option(None, "--session-id", help="Session ID"),
-    prompt: str | None = typer.Option(None, help="Three Ps: Prompt summary"),
-    process: str | None = typer.Option(None, help="Three Ps: Process summary"),
-    provenance: str | None = typer.Option(None, help="Three Ps: Provenance summary"),
-    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
-    purpose: str | None = typer.Option(None, "--purpose", help="Session purpose"),
-    target_flag: str | None = typer.Option(
-        None, "--target", help="Storage target: branch, main, or here"
-    ),
-):
-    """Archive a Claude Code transcript with research-grade metadata."""
-    # Determine input source: CLI arguments, stdin, or auto-discovery
-    transcript_path = None
-    sid = None
-
-    if transcript and session_id:
-        transcript_path = Path(transcript)
-        sid = session_id
-    elif transcript or session_id:
-        _archive.log_error("Both --transcript and --session-id must be provided together", quiet)
-        raise typer.Exit(code=1)
-    else:
-        if not sys.stdin.isatty():
-            stdin_content = sys.stdin.read().strip()
-            if stdin_content:
-                try:
-                    payload = json.loads(stdin_content)
-                    transcript_path = Path(payload.get("transcript_path", ""))
-                    sid = payload.get("session_id", "")
-                except json.JSONDecodeError:
-                    pass
-
-        if not transcript_path or not sid:
-            discovered = _discovery.auto_discover_transcript()
-            if discovered:
-                transcript_path, sid = discovered
-                _archive.log_info(f"Auto-discovered: {transcript_path}", quiet)
-            else:
-                searched = "\n".join(f"  {p}" for p in _discovery.get_searched_project_slugs())
-                _archive.log_error(
-                    "No transcript found. Searched:\n"
-                    f"{searched}\n"
-                    "Pass --transcript PATH --session-id UUID to archive a "
-                    "session that lives outside these project slugs.",
-                    quiet,
-                )
-                raise typer.Exit(code=1)
-
-    if not transcript_path or not sid:
-        _archive.log_error("Missing transcript_path or session_id in input", quiet)
-        raise typer.Exit(code=1)
-
-    project_dir = _discovery.get_project_dir_from_transcript(transcript_path)
-
-    # Load project defaults and determine target
-    defaults = _discovery.load_project_defaults(project_dir)
-
-    # Merge tags/purpose with project defaults
-    tag_list = _parse_tags(tags)
-    merged_tags = tag_list or defaults.get("tags", [])
-    merged_purpose = purpose or defaults.get("purpose", "")
-
-    # target_flag overrides defaults; --local/--output override both
-    target = target_flag or defaults.get("target")
-
-    # CLI flags override defaults: --local or --output override branch target
-    if local or output:
-        target = None
-
-    archive_dir = _discovery.get_archive_dir(
-        local=local,
-        output=output,
-        project_dir=project_dir if not local else None,
-    )
-
-    three_ps = None
-    if prompt or process or provenance:
-        three_ps = {
-            "prompt_summary": prompt or "",
-            "process_summary": process or "",
-            "provenance_summary": provenance or "",
-        }
-
-    output_dir = _archive.archive(
-        sid,
-        transcript_path,
-        archive_dir,
-        force=force,
-        force_retitle=retitle,
-        provided_title=title,
-        quiet=quiet,
-        three_ps=three_ps,
-        target=target,
-        tags=merged_tags,
-        purpose=merged_purpose,
-    )
-
-    if output_dir:
-        _archive.log_info(f"Archived to: {output_dir}", quiet)
-        _archive.log_info(f"View transcript: {output_dir / 'index.html'}", quiet)
-
-
-@app.command()
-def init(
-    non_interactive: bool = typer.Option(
-        False, "--non-interactive", help="Skip interactive prompts"
-    ),
-):
-    """Initialize transcript archiving for this repository.
-
-    Creates an orphan 'transcripts' branch, mounts a worktree at .ai-transcripts/,
-    and adds it to .gitignore. Safe to run multiple times (idempotent).
-    """
-    # Step 1: Verify git repo
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        )
-        repo_root = Path(result.stdout.strip())
-    except subprocess.CalledProcessError as err:
-        typer.echo("Error: not a git repository. Run 'git init' first.", err=True)
-        raise typer.Exit(code=1) from err
+        return json.loads(matches[0])
+    except json.JSONDecodeError as error:
+        raise ArchiveError(f"Transcript frontmatter has invalid {key}") from error
 
-    # Step 2: Check/create orphan branch
-    branch_check = subprocess.run(
-        ["git", "branch", "--list", "transcripts"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
+
+def _load_three_ps(path: Path) -> tuple[str, str, str]:
+    if not path.exists():
+        return "", "", ""
+    lines, closing = _front_matter(path.read_text(encoding="utf-8"))
+    values: list[str] = []
+    for key in _THREE_PS_KEYS:
+        value = _front_matter_value(lines, closing, key)
+        if value is None:
+            values.append("")
+        elif isinstance(value, str):
+            values.append(value)
+        else:
+            raise ArchiveError(f"Transcript frontmatter {key} must be a string")
+    return values[0], values[1], values[2]
+
+
+def _set_front_matter_values(content: str, values: dict[str, object]) -> str:
+    lines, closing = _front_matter(content)
+    indices: dict[str, int] = {}
+    for index, line in enumerate(lines[1:closing], start=1):
+        key = line.partition(":")[0]
+        if key in values:
+            if key in indices:
+                raise ArchiveError(f"Transcript frontmatter repeats {key}")
+            indices[key] = index
+    for key, value in values.items():
+        rendered = f"{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)}"
+        if key in indices:
+            lines[indices[key]] = rendered
+        else:
+            lines.insert(closing, rendered)
+            closing += 1
+    return "\n".join(lines) + "\n"
+
+
+def update_three_ps(
+    transcript: Path,
+    *,
+    prompt: str | None = None,
+    process: str | None = None,
+    provenance: str | None = None,
+) -> None:
+    """Update Three-Ps frontmatter without creating a metadata sidecar."""
+    current = _load_three_ps(transcript)
+    summaries = (
+        current[0] if prompt is None else prompt,
+        current[1] if process is None else process,
+        current[2] if provenance is None else provenance,
     )
-    if not branch_check.stdout.strip():
-        # Save current branch/commit for restore
-        current = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        )
-        saved_ref = current.stdout.strip()
-        if saved_ref == "HEAD":
-            # Detached HEAD — save the full SHA for checkout
-            sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            )
-            saved_ref = sha.stdout.strip()
+    updated = _set_front_matter_values(
+        transcript.read_text(encoding="utf-8"),
+        {
+            "prompt_summary": summaries[0],
+            "process_summary": summaries[1],
+            "provenance_summary": summaries[2],
+            "needs_review": not all(value.strip() for value in summaries),
+        },
+    )
+    temporary = _temporary_file(transcript.parent, updated)
+    try:
+        temporary.replace(transcript)
+    finally:
+        temporary.unlink(missing_ok=True)
 
-        try:
-            subprocess.run(
-                ["git", "switch", "--orphan", "transcripts"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            )
-            subprocess.run(
-                ["git", "commit", "--allow-empty", "-m", "init transcript archive"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            )
-        finally:
-            # Restore previous branch/commit — don't mask the original error
-            restore = subprocess.run(
-                ["git", "checkout", saved_ref],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=False,
-            )
-            if restore.returncode != 0:
-                typer.echo(
-                    f"Warning: failed to restore branch '{saved_ref}': {restore.stderr.strip()}",
-                    err=True,
-                )
-        typer.echo("Created orphan branch 'transcripts'")
-    else:
-        typer.echo("transcripts branch already exists")
 
-    # Step 3: Check/mount worktree
-    worktree_dir = repo_root / ".ai-transcripts"
-    if not worktree_dir.exists():
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_dir), "transcripts"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        )
-        typer.echo(f"Mounted worktree at {worktree_dir}")
-    else:
-        typer.echo("worktree already mounted at .ai-transcripts/")
+def _load_three_ps_metadata(path: Path) -> tuple[str, str, str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArchiveError(f"Could not read Three-Ps metadata from {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ArchiveError("Three-Ps metadata must be a JSON object")
+    expected = {"prompt", "process", "provenance"}
+    if set(value) != expected:
+        raise ArchiveError("Three-Ps metadata must contain exactly prompt, process, and provenance")
+    summaries = tuple(value[key] for key in ("prompt", "process", "provenance"))
+    if not all(isinstance(summary, str) for summary in summaries):
+        raise ArchiveError("Every Three-Ps metadata value must be a string")
+    return cast("tuple[str, str, str]", summaries)
 
-    # Step 4: Check/update .gitignore
-    gitignore_path = repo_root / ".gitignore"
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
-    if not any(line.strip() == ".ai-transcripts/" for line in existing.splitlines()):
-        with gitignore_path.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write(".ai-transcripts/\n")
-        typer.echo("Added .ai-transcripts/ to .gitignore")
-    else:
-        typer.echo(".ai-transcripts/ already in .gitignore")
 
-    # Step 5: Install Stop hook in settings.local.json
-    settings_path = repo_root / ".claude" / "settings.local.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
+def _publish_parts(
+    source: SourceDescriptor,
+    parts: tuple[RenderedPart, ...],
+    archive_root: Path,
+) -> tuple[Path, ...]:
+    session_directory = _safe_session_directory(archive_root, source)
+    session_directory.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    try:
+        for part in parts:
+            destination = session_directory / part.filename
+            temporary.append((_temporary_file(session_directory, part.content), destination))
+        destinations = {destination for _, destination in temporary}
+        for temporary_path, destination in temporary:
+            temporary_path.replace(destination)
+        for stale in session_directory.glob("transcript*.md"):
+            if stale not in destinations:
+                stale.unlink()
+        return tuple(sorted(destinations))
+    finally:
+        for temporary_path, _ in temporary:
+            temporary_path.unlink(missing_ok=True)
 
-    if settings_path.exists():
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    else:
-        settings = {}
 
-    our_hook = {
-        "type": "command",
-        "command": "claude-research-transcript archive --quiet",
+def _state_entry(
+    source: SourceDescriptor,
+    stamps: tuple[tuple[Path, SourceStamp], ...],
+    fingerprint: str,
+    outputs: tuple[Path, ...],
+    archive_root: Path,
+) -> dict[str, object]:
+    return {
+        "path": str(source.path),
+        "inputs": _stamp_state(stamps),
+        "redactions": fingerprint,
+        "recovered_working_directories": list(source.recovered_working_directories),
+        "outputs": [str(output.relative_to(archive_root)) for output in sorted(outputs)],
     }
 
-    hooks = settings.setdefault("hooks", {})
-    stop_hooks = hooks.setdefault("Stop", [])
 
-    existing_commands = [h.get("command") for h in stop_hooks]
-    if our_hook["command"] not in existing_commands:
-        stop_hooks.append(our_hook)
-        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-        typer.echo("Installed Stop hook in .claude/settings.local.json")
-    else:
-        typer.echo("Stop hook already installed")
-
-    # Step 6: Create project defaults
-    defaults_path = repo_root / ".claude" / "transcript-defaults.json"
-    if defaults_path.exists():
-        typer.echo("defaults already configured")
-    else:
-        if non_interactive:
-            defaults = {
-                "tags": [],
-                "purpose": "",
-                "three_ps_context": {
-                    "prompt_template": "",
-                    "process_template": "",
-                    "provenance_template": "",
-                },
-                "target": "branch",
-            }
-        else:
-            tags_input = typer.prompt("Tags (comma-separated)", default="")
-            tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
-            purpose = typer.prompt("Purpose", default="")
-            prompt_tpl = typer.prompt("Three Ps - Prompt template", default="")
-            process_tpl = typer.prompt("Three Ps - Process template", default="")
-            provenance_tpl = typer.prompt("Three Ps - Provenance template", default="")
-            target = typer.prompt("Target (branch/main/here)", default="branch")
-            defaults = {
-                "tags": tags,
-                "purpose": purpose,
-                "three_ps_context": {
-                    "prompt_template": prompt_tpl,
-                    "process_template": process_tpl,
-                    "provenance_template": provenance_tpl,
-                },
-                "target": target,
-            }
-        defaults_path.parent.mkdir(parents=True, exist_ok=True)
-        defaults_path.write_text(json.dumps(defaults, indent=2), encoding="utf-8")
-        typer.echo("Created transcript defaults")
-
-
-@app.command()
-def status(
-    json_output: bool = typer.Option(False, "--json", help="Machine-readable JSON output"),
-):
-    """Report session state across worktrees."""
+def _write_state(path: Path, state: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    temporary = _temporary_file(path.parent, content)
     try:
-        worktrees = _discovery.resolve_worktrees()
-    except RuntimeError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
-    sessions = _discovery.discover_sessions()
 
-    # Determine archive location
-    project_dir = _discovery.get_project_dir_from_transcript(sessions[0][0]) if sessions else None
-    defaults = _discovery.load_project_defaults(project_dir)
-    target = defaults.get("target", "branch")
+def _generate_one(
+    source: SourceDescriptor,
+    *,
+    archive_root: Path,
+    rules: tuple[RedactionRule, ...],
+    scanner: CandidateScanner,
+    loader: Callable[[Path], tuple[RawRecord, ...]],
+) -> tuple[tuple[Path, ...], int]:
+    before = _current_stamps(source)
+    records = loader(source.path)
+    sidechain_omissions = tuple(
+        omission
+        for path in source.sidechain_shards
+        if (
+            omission := _sidechain_omission(
+                source,
+                path,
+                loader(path),
+            )
+        )
+        is not None
+    )
+    after = _current_stamps(source)
+    if before != after:
+        raise ArchiveError(f"Source changed while reading session {source.session_id}")
+    redacted = redact_records(
+        records,
+        rules,
+        tool=source.tool,
+        session_id=source.session_id,
+    )
+    adapted = _adapt(source, redacted.records)
+    transcript = _safe_session_directory(archive_root, source) / "transcript.md"
+    prompt, process, provenance = _load_three_ps(transcript)
+    session = replace(
+        adapted,
+        events=(*adapted.events, *sidechain_omissions),
+        recovered_working_directories=source.recovered_working_directories,
+        redactions=redacted.applied,
+        sidechain_source_paths=source.sidechain_shards,
+        prompt_summary=prompt,
+        process_summary=process,
+        provenance_summary=provenance,
+        needs_review=not all(value.strip() for value in (prompt, process, provenance)),
+    )
+    parts = render_session(session)
+    _scan_parts(parts, scanner)
+    outputs = _publish_parts(source, parts, archive_root)
+    return outputs, sum(len(part.content.encode()) for part in parts)
 
-    if target == "branch":
-        # Use .ai-transcripts/ worktree
+
+def _sidechain_omission(
+    source: SourceDescriptor,
+    path: Path,
+    records: tuple[RawRecord, ...],
+) -> Omission | None:
+    if source.tool == "claude":
+        return sidechain_shard_omission(
+            records,
+            session_id=source.session_id,
+            source_path=path,
+        )
+    return subagent_rollout_omission(
+        records,
+        parent_session_id=source.session_id,
+        source_path=path,
+    )
+
+
+def generate_sources(
+    sources: tuple[SourceDescriptor, ...],
+    *,
+    archive_root: Path,
+    state_path: Path,
+    rules: tuple[RedactionRule, ...],
+    scanner: CandidateScanner,
+    loader: Callable[[Path], tuple[RawRecord, ...]] = load_raw_records,
+) -> GenerationResult:
+    """Generate every changed source and preserve safe per-source failures."""
+    previous = _load_state(state_path)
+    previous_sources = _state_sources(previous)
+    next_sources: dict[str, object] = {}
+    failures: list[SourceFailure] = []
+    rendered = 0
+    skipped = 0
+    bytes_written = 0
+    for source in sources:
+        key = _source_key(source)
         try:
-            repo_root = Path(
-                subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    check=True,
-                ).stdout.strip()
+            stamps = _current_stamps(source)
+            fingerprint = _rule_fingerprint(rules, source)
+            previous_entry = previous_sources.get(key)
+            if _can_skip(
+                source,
+                stamps,
+                fingerprint,
+                previous_entry,
+                archive_root,
+            ):
+                next_sources[key] = previous_entry
+                skipped += 1
+                continue
+            outputs, written = _generate_one(
+                source,
+                archive_root=archive_root,
+                rules=rules,
+                scanner=scanner,
+                loader=loader,
             )
-        except subprocess.CalledProcessError:
-            repo_root = Path.cwd()
-        archive_dir = repo_root / ".ai-transcripts"
-    else:
-        archive_dir = _discovery.get_archive_dir(
-            local=(target == "here"),
-            output=None,
-            project_dir=project_dir,
-        )
-
-    manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}
-    catalog = _catalog.load_catalog(archive_dir) if archive_dir.exists() else {"sessions": []}
-
-    # Cross-reference sessions with manifest. Phase 6 (AC6.2): stitched
-    # clusters appear ONCE in the archived list — manifest fan-in points every
-    # constituent UUID at the same directory, so we group by archive dir first
-    # and emit one row per unique dir with cluster/constituent metadata.
-    dir_to_constituents: dict[str, list[tuple[Path, str]]] = {}
-    unarchived: list[dict] = []
-    for transcript_path, session_id in sessions:
-        if session_id in manifest:
-            dir_str = manifest[session_id]
-            dir_to_constituents.setdefault(dir_str, []).append((transcript_path, session_id))
-        else:
-            content = (
-                transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
+            final_stamps = _current_stamps(source)
+            next_sources[key] = _state_entry(
+                source,
+                final_stamps,
+                fingerprint,
+                outputs,
+                archive_root,
             )
-            classification = _metadata.classify_session(content)
-            unarchived.append(
-                {
-                    "session_id": session_id,
-                    "transcript_path": str(transcript_path),
-                    "classification": classification,
-                }
-            )
-
-    archived: list[dict] = []
-    for dir_str, constituents in dir_to_constituents.items():
-        meta_path = Path(dir_str) / "session.meta.json"
-        is_cluster = False
-        constituent_count = len(constituents)
-        needs_review = True
-        title = None
-        primary_sid = constituents[0][1]
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                archive_block = meta.get("archive", {})
-                is_cluster = bool(archive_block.get("stitched"))
-                needs_review = archive_block.get("needs_review", True)
-                title = meta.get("auto_generated", {}).get("title")
-                if is_cluster:
-                    constituent_count = len(meta.get("_constituent_sessions", []))
-                    cs = meta.get("_constituent_sessions") or []
-                    if cs:
-                        primary_sid = cs[0].get("id", primary_sid)
-            except (json.JSONDecodeError, ValueError, OSError):
-                pass
-        if title is None:
-            for _, sid in constituents:
-                catalog_entry = next(
-                    (s for s in catalog.get("sessions", []) if s.get("session_id") == sid),
-                    {},
+            rendered += 1
+            bytes_written += written
+        except (ArchiveError, OSError, ValueError) as error:
+            failures.append(
+                SourceFailure(
+                    tool=source.tool,
+                    session_id=source.session_id,
+                    reason=str(error),
                 )
-                if catalog_entry:
-                    needs_review = catalog_entry.get("needs_review", needs_review)
-                    title = catalog_entry.get("title")
-                    break
-        archived.append(
-            {
-                "session_id": primary_sid,
-                "transcript_path": str(constituents[0][0]),
-                "needs_review": needs_review,
-                "stitched": is_cluster,
-                "constituent_count": constituent_count,
-                "title": title,
-            }
-        )
-
-    if json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "worktrees": len(worktrees),
-                    "archived": archived,
-                    "unarchived": unarchived,
-                    "total": len(archived) + len(unarchived),
-                },
-                indent=2,
             )
+    _write_state(
+        state_path,
+        {"version": _STATE_VERSION, "sources": next_sources},
+    )
+    return GenerationResult(
+        discovered=len(sources),
+        rendered=rendered,
+        skipped=skipped,
+        bytes_written=bytes_written,
+        failures=tuple(failures),
+    )
+
+
+def _load_rules(path: Path) -> tuple[RedactionRule, ...]:
+    with path.open("rb") as source:
+        return parse_redactions(tomllib.load(source))
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate repository-local AI session transcripts")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("generate", "update"),
+        default="generate",
+    )
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--source",
+        choices=("all", "claude", "codex"),
+        default="all",
+        help="source store to generate (default: both)",
+    )
+    parser.add_argument(
+        "--claude-root",
+        type=Path,
+        default=Path.home() / ".claude" / "projects",
+    )
+    parser.add_argument(
+        "--codex-root",
+        type=Path,
+        default=Path.home() / ".codex" / "sessions",
+    )
+    parser.add_argument("--archive-root", type=Path)
+    parser.add_argument("--tool", choices=("claude", "codex"))
+    parser.add_argument("--session-id")
+    parser.add_argument("--prompt")
+    parser.add_argument("--process")
+    parser.add_argument("--provenance")
+    parser.add_argument("--metadata-file", type=Path)
+    parser.add_argument("--redactions", type=Path)
+    parser.add_argument(
+        "--gitleaks",
+        help=("explicit Gitleaks executable; otherwise resolve GITLEAKS, PATH, then pre-commit"),
+    )
+    return parser
+
+
+def _report(result: GenerationResult) -> str:
+    lines = [
+        f"discovered={result.discovered}",
+        f"rendered={result.rendered}",
+        f"skipped={result.skipped}",
+        f"bytes_written={result.bytes_written}",
+        f"failed={result.failed}",
+    ]
+    lines.extend(
+        f"failure {failure.tool}/{failure.session_id}: {failure.reason}"
+        for failure in result.failures
+    )
+    return "\n".join(lines) + "\n"
+
+
+def format_discovery_exclusions(
+    exclusions: tuple[DiscoveryExclusion, ...],
+) -> str:
+    """Render deterministic source-membership exclusions without source content."""
+    lines = [f"excluded={len(exclusions)}"]
+    lines.extend(
+        f"exclusion {exclusion.tool}/{exclusion.session_id}: {exclusion.reason} [{exclusion.path}]"
+        for exclusion in exclusions
+    )
+    return "\n".join(lines) + "\n"
+
+
+def missing_source_roots(
+    claude_root: Path,
+    codex_root: Path,
+    source: str = "all",
+) -> tuple[tuple[str, Path], ...]:
+    """Name the session stores that are absent, so callers can fail loudly.
+
+    Every caller that discovers from the local stores must ask this first:
+    discovery reports zero sources for a missing root, which reads as an
+    honest empty result and hides the fact that nothing was searched.
+    """
+    return tuple(
+        (tool, root)
+        for tool, root in (("Claude", claude_root), ("Codex", codex_root))
+        if source == "all" or tool.lower() == source
+        if not root.is_dir()
+    )
+
+
+def _format_missing_source_roots(
+    missing_roots: tuple[tuple[str, Path], ...],
+) -> str:
+    lines = ["source stores are unavailable; missing roots:"]
+    lines.extend(f"- {tool}: {root}" for tool, root in missing_roots)
+    return "\n".join(lines) + "\n"
+
+
+def _run_update(options: argparse.Namespace) -> int:
+    if options.tool is None or options.session_id is None:
+        sys.stderr.write("update requires --tool and --session-id\n")
+        return 1
+    direct_summaries = (options.prompt, options.process, options.provenance)
+    if options.metadata_file is not None and any(
+        summary is not None for summary in direct_summaries
+    ):
+        sys.stderr.write(
+            "update accepts either --metadata-file or direct Three-Ps options, not both\n"
         )
-    else:
-        reviewed = sum(1 for s in archived if not s["needs_review"])
-        needs_review = sum(1 for s in archived if s["needs_review"])
-        substantial = sum(1 for s in unarchived if s["classification"] == "substantial")
-        trivial = sum(1 for s in unarchived if s["classification"] == "trivial")
-
-        repo_name = Path.cwd().name
-        typer.echo(
-            f"Project: {repo_name} ({len(worktrees)} worktree{'s' if len(worktrees) != 1 else ''})"
-        )
-        typer.echo("")
-        typer.echo(
-            f"  Archived:    {len(archived)} sessions"
-            f" ({reviewed} reviewed, {needs_review} needs_review)"
-        )
-        typer.echo(
-            f"  Unarchived:  {len(unarchived)} sessions"
-            f" ({substantial} substantial, {trivial} trivial)"
-        )
-        typer.echo(f"  Total:       {len(archived) + len(unarchived)} sessions")
-
-        stitched_rows = [s for s in archived if s.get("stitched")]
-        if stitched_rows:
-            typer.echo("")
-            typer.echo("Stitched clusters:")
-            for entry in stitched_rows:
-                label = entry.get("title") or entry["session_id"]
-                typer.echo(
-                    f"  {label} ({entry['constituent_count']} sessions stitched)"
-                )
-
-        if unarchived:
-            typer.echo("")
-            typer.echo("Unarchived sessions:")
-            for entry in unarchived:
-                typer.echo(f"  [{entry['classification']:>11}] {entry['session_id']}")
-            typer.echo("")
-            typer.echo("  Archive all:   claude-research-transcript bulk")
-            typer.echo("  Archive one:   claude-research-transcript archive --session-id <UUID>")
-
-        review_targets = [s for s in archived if s["needs_review"]]
-        if review_targets:
-            typer.echo("")
-            typer.echo("Needs review:")
-            for entry in review_targets:
-                typer.echo(f"  {entry['session_id']}")
-            typer.echo("")
-            typer.echo(
-                "  Update one:    claude-research-transcript update"
-                " --session-id <UUID> --prompt ... --process ... --provenance ..."
-            )
-            typer.echo(
-                "  Update all:    claude-research-transcript update"
-                " --all-needs-review --tags ... --purpose ..."
-            )
-
-
-@app.command()
-def bulk(
-    local: bool = typer.Option(False, help="Archive to ./ai_transcripts/"),
-    output: str | None = typer.Option(None, help="Custom output directory"),
-    quiet: bool = typer.Option(False, help="Suppress output"),
-    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
-    purpose: str | None = typer.Option(None, "--purpose", help="Session purpose"),
-):
-    """Archive all unarchived sessions in bulk."""
+        return 1
     try:
-        _discovery.resolve_worktrees()
-    except RuntimeError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-
-    sessions = _discovery.discover_sessions()
-    if not sessions:
-        if not quiet:
-            typer.echo("No sessions found.")
-        return
-
-    # Determine archive location
-    project_dir = _discovery.get_project_dir_from_transcript(sessions[0][0])
-    defaults = _discovery.load_project_defaults(project_dir)
-    target = defaults.get("target")
-
-    # Merge tags/purpose with project defaults
-    tag_list = _parse_tags(tags)
-    merged_tags = tag_list or defaults.get("tags", [])
-    merged_purpose = purpose or defaults.get("purpose", "")
-
-    # CLI flags override defaults
-    if local or output:
-        target = None
-
-    if target == "branch":
-        try:
-            repo_root = Path(
-                subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    check=True,
-                ).stdout.strip()
-            )
-        except subprocess.CalledProcessError:
-            repo_root = Path.cwd()
-        archive_dir = repo_root / ".ai-transcripts"
+        if options.metadata_file is None:
+            prompt, process, provenance = direct_summaries
+        else:
+            prompt, process, provenance = _load_three_ps_metadata(options.metadata_file)
+    except ArchiveError as error:
+        sys.stderr.write(f"update failed: {error}\n")
+        return 1
+    runner: ProcessRunner = SubprocessRunner()
+    if options.archive_root is None:
+        archive_root = inspect_repository(options.repo, runner=runner).root / "ai_transcripts"
     else:
-        # target == "here" maps to local=True (mirrors _resolve_archive_dir);
-        # without this, `bulk` falls through to the global archive even when the
-        # project's defaults explicitly request local storage.
-        use_local = local or target == "here"
-        archive_dir = _discovery.get_archive_dir(
-            local=use_local,
-            output=output,
-            project_dir=project_dir if not use_local else None,
-        )
-
-    manifest = _catalog.load_manifest(archive_dir) if archive_dir.exists() else {}
-
-    # Filter to unarchived sessions
-    unarchived = [(tp, sid) for tp, sid in sessions if sid not in manifest]
-
-    if not unarchived:
-        if not quiet:
-            typer.echo("All sessions already archived.")
-        return
-
-    archived_count = 0
-    trivial_count = 0
-
-    # auto-stitch: group by (project, customTitle); singletons take the
-    # existing archive() path, multi-session clusters dispatch to stitch_cluster.
-    clusters = _discovery.discover_clusters(unarchived)
-    stitched_count = 0
-
-    for members in clusters.values():
-        if len(members) >= 2:
-            # Cluster trivial classification: stitched arcs are by definition
-            # substantial (≥2 substantial-or-trivial sessions on the same arc);
-            # we mark trivial only if every constituent is trivial individually.
-            cluster_trivial = all(
-                _metadata.classify_session(
-                    p.read_text(encoding="utf-8") if p.exists() else ""
-                ) == "trivial"
-                for p, _ in members
-            )
-            if cluster_trivial:
-                trivial_count += 1
-            result = _archive.stitch_cluster(
-                members,
-                archive_dir,
-                quiet=quiet,
-                tags=merged_tags,
-                purpose=merged_purpose,
-                trivial=cluster_trivial,
-            )
-            if result:
-                stitched_count += 1
-            continue
-
-        transcript_path, session_id = members[0]
-        content = transcript_path.read_text(encoding="utf-8") if transcript_path.exists() else ""
-        classification = _metadata.classify_session(content)
-
-        if classification == "trivial":
-            trivial_count += 1
-
-        result = _archive.archive(
-            session_id,
-            transcript_path,
-            archive_dir,
-            quiet=quiet,
-            target=target,
-            trivial=(classification == "trivial"),
-            tags=merged_tags,
-            purpose=merged_purpose,
-        )
-        if result:
-            archived_count += 1
-
-    if not quiet:
-        stitch_phrase = f", {stitched_count} stitched" if stitched_count else ""
-        typer.echo(
-            f"Bulk archive complete: {archived_count} archived"
-            f" ({trivial_count} trivial){stitch_phrase}"
-            f", {len(sessions) - len(unarchived)} already archived"
-        )
-
-
-@app.command()
-def update(
-    session_id: str | None = typer.Option(None, "--session-id", help="Session ID to update"),
-    all_needs_review: bool = typer.Option(
-        False, "--all-needs-review", help="Update all sessions needing review"
-    ),
-    title: str | None = typer.Option(None, "--title", help="New title"),
-    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags"),
-    purpose: str | None = typer.Option(None, "--purpose", help="Purpose description"),
-    prompt: str | None = typer.Option(None, "--prompt", help="Three Ps: Prompt summary"),
-    process: str | None = typer.Option(None, "--process", help="Three Ps: Process summary"),
-    provenance: str | None = typer.Option(
-        None, "--provenance", help="Three Ps: Provenance summary"
-    ),
-    quiet: bool = typer.Option(False, help="Suppress output"),
-):
-    """Update metadata on existing archived sessions."""
-    if not session_id and not all_needs_review:
-        typer.echo("Error: provide --session-id or --all-needs-review", err=True)
-        raise typer.Exit(code=1)
-
-    archive_dir = _resolve_archive_dir()
-    if not archive_dir.exists():
-        typer.echo("Error: no archive found. Run 'init' first.", err=True)
-        raise typer.Exit(code=1)
-
-    manifest = _catalog.load_manifest(archive_dir)
-
-    # Collect target sessions
-    target_sessions: list[tuple[str, Path]] = []
-    if session_id:
-        if session_id not in manifest:
-            typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
-            raise typer.Exit(code=1)
-        target_sessions.append((session_id, Path(manifest[session_id])))
-    elif all_needs_review:
-        for sid, dir_str in manifest.items():
-            sidecar_path = Path(dir_str) / "session.meta.json"
-            if sidecar_path.exists():
-                try:
-                    meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
-                    if meta.get("archive", {}).get("needs_review", True):
-                        target_sessions.append((sid, Path(dir_str)))
-                except json.JSONDecodeError:
-                    continue
-
-    if not target_sessions:
-        if not quiet:
-            typer.echo("No sessions to update.")
-        return
-
-    tag_list = _parse_tags(tags)
-    updated_count = sum(
-        _archive.update_metadata(
-            session_dir,
-            title=title,
-            tags=tag_list,
-            purpose=purpose,
+        archive_root = options.archive_root
+    source = SourceDescriptor(
+        tool=options.tool,
+        session_id=options.session_id,
+        path=Path("unused"),
+        working_directories=(),
+        stamp=SourceStamp(size=0, mtime_ns=0),
+    )
+    transcript = _safe_session_directory(archive_root, source) / "transcript.md"
+    try:
+        update_three_ps(
+            transcript,
             prompt=prompt,
             process=process,
             provenance=provenance,
         )
-        for _, session_dir in target_sessions
+    except (ArchiveError, OSError, ValueError) as error:
+        sys.stderr.write(f"update failed: {error}\n")
+        return 1
+    sys.stdout.write(f"updated={options.tool}/{options.session_id}\n")
+    return 0
+
+
+def _run_generate(options: argparse.Namespace) -> int:
+    missing_roots = missing_source_roots(
+        options.claude_root,
+        options.codex_root,
+        options.source,
     )
+    if missing_roots:
+        sys.stderr.write(_format_missing_source_roots(missing_roots))
+        return 1
 
-    _catalog.rebuild_indexes(archive_dir)
-
-    if not quiet:
-        typer.echo(f"Updated {updated_count} session(s)")
-
-
-@app.command()
-def regenerate(
-    session_id: str | None = typer.Option(None, "--session-id", help="Session to regenerate"),
-    all_sessions: bool = typer.Option(False, "--all", help="Regenerate all archived sessions"),
-    quiet: bool = typer.Option(False, help="Suppress output"),
-):
-    """Re-render output files from raw transcript backups."""
-    if not session_id and not all_sessions:
-        typer.echo("Error: provide --session-id or --all", err=True)
-        raise typer.Exit(code=1)
-
-    archive_dir = _resolve_archive_dir()
-    if not archive_dir.exists():
-        typer.echo("Error: no archive found. Run 'init' first.", err=True)
-        raise typer.Exit(code=1)
-
-    manifest = _catalog.load_manifest(archive_dir)
-
-    target_dirs: list[Path] = []
-    if session_id:
-        if session_id not in manifest:
-            typer.echo(f"Error: session '{session_id}' not found in archive", err=True)
-            raise typer.Exit(code=1)
-        target_dirs.append(Path(manifest[session_id]))
-    elif all_sessions:
-        target_dirs = [Path(d) for d in manifest.values()]
-
-    regenerated = sum(_archive.regenerate_outputs(d, quiet=quiet) for d in target_dirs)
-
-    if not quiet:
-        typer.echo(f"Regenerated {regenerated} session(s)")
-
-
-def _resolve_source_jsonl(source_uuid: str, manifest: dict) -> Path | None:
-    """Resolve a source UUID to its raw JSONL path for `stitch`.
-
-    Manifest hit wins — for sessions already archived as singletons (the
-    MELICA dad509ba case), the archive's own ``raw-transcript.jsonl`` is the
-    canonical source. For unarchived sessions, fall back to scanning
-    ``~/.claude/projects/`` via ``discover_sessions``. Returns ``None`` when
-    neither lookup yields a file.
-    """
-    if source_uuid in manifest:
-        archive_path = Path(manifest[source_uuid])
-        raw = archive_path / "raw-transcript.jsonl"
-        if raw.exists():
-            return raw
-    try:
-        sessions = _discovery.discover_sessions()
-    except RuntimeError:
-        return None
-    for transcript_path, sid in sessions:
-        if sid == source_uuid:
-            return transcript_path
-    return None
-
-
-@app.command()
-def stitch(
-    sessions: list[str] = typer.Argument(
-        ...,
-        help="One or more session UUIDs to attach to --into.",
-    ),
-    into: str = typer.Option(
-        ...,
-        "--into",
-        help="UUID of the target archive (cluster or singleton).",
-    ),
-    local: bool = typer.Option(False, help="Use ./ai_transcripts/"),
-    output: str | None = typer.Option(None, help="Custom archive directory"),
-    quiet: bool = typer.Option(False, help="Suppress output"),
-):
-    """Force-stitch sessions into an existing cluster or singleton (Phase 5).
-
-    Bypasses customTitle detection — useful for legacy sessions that predate
-    the `/exec-session-naming` convention (e.g. MELICA's dad509ba). When the
-    target is a singleton, it is promoted to a cluster as part of the
-    operation. Sources already constituent of the target cluster are skipped
-    (idempotent, exit 0).
-    """
-    if local or output:
-        archive_dir = _discovery.get_archive_dir(
-            local=local,
-            output=output,
-            project_dir=None if local else Path.cwd(),
-        )
-    else:
-        archive_dir = _resolve_archive_dir()
-
-    if not archive_dir.exists():
-        typer.echo(
-            f"Error: no archive found at {archive_dir}. "
-            "Run 'init' or 'archive' first.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    manifest = _catalog.load_manifest(archive_dir)
-    if into not in manifest:
-        typer.echo(
-            f"Error: stitch: no archive found for {into}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    source_specs: list[tuple[str, Path]] = []
-    for source_uuid in sessions:
-        jsonl_path = _resolve_source_jsonl(source_uuid, manifest)
-        if jsonl_path is None:
-            typer.echo(
-                f"Error: stitch: cannot locate JSONL for {source_uuid} "
-                "(not in manifest, not under ~/.claude/projects/).",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        source_specs.append((source_uuid, jsonl_path))
-
-    result = _archive.stitch_sessions(
-        target_uuid=into,
-        source_specs=source_specs,
-        archive_dir=archive_dir,
-        quiet=quiet,
+    runner = SubprocessRunner()
+    gitleaks = resolve_gitleaks(
+        options.gitleaks,
+        environment=os.environ,
+        home=Path.home(),
     )
-    if result is None:
-        raise typer.Exit(code=1)
-
-    if not quiet:
-        # Contextual summary — don't claim "Stitched to:" when every source
-        # was an idempotent no-op (the MELICA self-stitch case).
-        if result.attached > 0:
-            summary = (
-                f"Stitched {result.attached} attached, "
-                f"{result.skipped} skipped, {result.failed} failed "
-                f"into: {result.directory}"
-            )
-        elif result.failed > 0 and result.skipped == 0:
-            summary = (
-                f"No sources attached — {result.failed} failed. "
-                f"Target: {result.directory}"
-            )
-        elif result.skipped > 0:
-            summary = (
-                f"No changes — all {result.skipped} source(s) already "
-                f"represent {result.directory.name}"
-            )
-        else:
-            summary = f"No sources processed. Target: {result.directory}"
-        typer.echo(summary)
-
-
-@app.command()
-def clean(
-    dry_run: bool = typer.Option(
-        True, "--dry-run/--execute", help="Report without changes (default) or execute"
-    ),
-    quiet: bool = typer.Option(False, help="Suppress output"),
-):
-    """Clean archive: deduplicate, migrate legacy, repair indexes."""
-    archive_dir = _resolve_archive_dir()
-
-    if not archive_dir.exists():
-        if not quiet:
-            typer.echo("No archive found. Nothing to clean.")
-        return
-
-    findings = []
-
-    # Step 1: Find duplicates
-    duplicates = _archive.find_duplicates(archive_dir)
-    if duplicates:
-        for sid, dirs in duplicates:
-            dir_names = [d.name for d in dirs]
-            findings.append(f"Duplicate: {sid} in {', '.join(dir_names)}")
-            if not dry_run:
-                # Keep the newest (last by name, which is date-prefixed)
-                dirs_sorted = sorted(dirs, key=lambda d: d.name)
-                for old_dir in dirs_sorted[:-1]:
-                    shutil.rmtree(old_dir)
-
-    # Step 2: Check for legacy directory
-    try:
-        repo_root = Path(
-            subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            ).stdout.strip()
-        )
-    except subprocess.CalledProcessError:
-        repo_root = Path.cwd()
-
-    legacy_dir = repo_root / "ai_transcripts"
-    migrated = _archive.migrate_legacy(legacy_dir, archive_dir, dry_run=dry_run)
-    if migrated:
-        findings.append(f"Legacy migration: {len(migrated)} session(s) from ai_transcripts/")
-
-    # Step 3: Rebuild indexes
-    if not dry_run:
-        count = _catalog.rebuild_indexes(archive_dir)
-        findings.append(f"Rebuilt indexes: {count} session(s)")
+    scanner: CandidateScanner
+    if gitleaks.executable is None:
+        scanner = UnavailableGitleaksScanner(gitleaks.failure_message)
     else:
-        # Check if indexes need rebuild
-        manifest_path = archive_dir / ".session_manifest.json"
-        catalog_path = archive_dir / "CATALOG.json"
-        if not manifest_path.exists() or not catalog_path.exists():
-            findings.append("Would rebuild indexes (missing index files)")
+        scanner = GitleaksScanner(
+            executable=gitleaks.executable,
+            runner=runner,
+        )
+    identity = inspect_repository(options.repo, runner=runner)
+    resolver = GitRepositoryResolver(runner)
+    archive_root = options.archive_root or identity.root / "ai_transcripts"
+    discovery = discover_sessions_cached(
+        identity,
+        resolver=resolver,
+        claude_root=options.claude_root,
+        codex_root=options.codex_root,
+        cache_path=archive_root / ".discovery.json",
+    )
+    if options.source != "all":
+        discovery = DiscoveryResult(
+            sources=tuple(source for source in discovery.sources if source.tool == options.source),
+            exclusions=tuple(
+                exclusion for exclusion in discovery.exclusions if exclusion.tool == options.source
+            ),
+        )
+    redactions_path = options.redactions or archive_root / "redactions.toml"
+    result = generate_sources(
+        discovery.sources,
+        archive_root=archive_root,
+        state_path=archive_root
+        / (".state.json" if options.source == "all" else f".state-{options.source}.json"),
+        rules=_load_rules(redactions_path),
+        scanner=scanner,
+    )
+    sys.stdout.write(format_discovery_exclusions(discovery.exclusions))
+    sys.stdout.write(_report(result))
+    return 1 if result.failures else 0
 
-    if not quiet:
-        if findings:
-            prefix = "[DRY RUN] " if dry_run else ""
-            for finding in findings:
-                typer.echo(f"{prefix}{finding}")
-        else:
-            typer.echo("Archive is clean. No issues found.")
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    """Run deterministic discovery and generation."""
+    options = _parser().parse_args(arguments)
+    return _run_update(options) if options.command == "update" else _run_generate(options)
 
 
 if __name__ == "__main__":
-    app()
+    raise SystemExit(main())

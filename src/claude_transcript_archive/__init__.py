@@ -1,3 +1,3 @@
-"""Archive Claude Code transcripts with HTML output."""
+"""Archive Claude Code and Codex sessions as searchable Markdown."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

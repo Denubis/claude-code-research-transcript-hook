@@ -1,0 +1,23 @@
+{
+  "name": "transcript-archive",
+  "version": "1.0.0",
+  "description": "Archive Claude Code and Codex sessions as searchable Markdown with Three-Ps metadata",
+  "author": {
+    "name": "Brian Ballsun-Stanton",
+    "url": "https://github.com/Denubis"
+  },
+  "homepage": "https://github.com/Denubis/claude-code-research-transcript-hook",
+  "repository": "https://github.com/Denubis/claude-code-research-transcript-hook",
+  "license": "MIT",
+  "keywords": ["research", "transcript", "archive", "claude", "codex", "reproducibility", "markdown"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Transcript Archive",
+    "shortDescription": "Archive searchable Claude and Codex transcripts",
+    "longDescription": "Generate one deterministic, searchable Markdown archive for each Claude Code or Codex parent session, with Three-Ps metadata and explicit omission evidence.",
+    "developerName": "Brian Ballsun-Stanton",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": ["Archive this AI coding session with reviewed Three-Ps metadata."]
+  }
+}

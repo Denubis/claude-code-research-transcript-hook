@@ -1,0 +1,20 @@
+{
+  "name": "transcript-archive-marketplace",
+  "interface": {
+    "displayName": "Transcript Archive"
+  },
+  "plugins": [
+    {
+      "name": "transcript-archive",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
