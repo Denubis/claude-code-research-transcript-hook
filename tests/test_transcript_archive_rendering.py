@@ -172,6 +172,87 @@ def test_render_distinguishes_rollback_from_compaction_boundary() -> None:
     assert "- Change: Codex thread rolled back" in content
 
 
+def test_render_groups_tool_only_activity_without_crossing_visible_boundaries() -> None:
+    events = (
+        Turn(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(2),
+            timestamp="2026-07-20T01:00:01Z",
+            role="assistant",
+            text_blocks=(),
+            tool_calls=(ToolCallSummary("exec", "Ran code"),),
+        ),
+        Omission(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(3),
+            timestamp="2026-07-20T01:00:02Z",
+            category="tool-output",
+            reason="Tool outputs are not archived",
+        ),
+        Turn(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(4),
+            timestamp="2026-07-20T01:00:03Z",
+            role="assistant",
+            text_blocks=(),
+            tool_calls=(ToolCallSummary("exec", "Ran code"),),
+        ),
+        Turn(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(5),
+            timestamp="2026-07-20T01:00:04Z",
+            role="assistant",
+            text_blocks=("Checkpoint explanation",),
+        ),
+        Turn(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(6),
+            timestamp="2026-07-20T01:00:05Z",
+            role="assistant",
+            text_blocks=(),
+            tool_calls=(ToolCallSummary("web", "Searched the web"),),
+        ),
+        Boundary(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(7),
+            timestamp="2026-07-20T01:00:06Z",
+            kind="compaction",
+            label="Codex context compacted",
+        ),
+        Turn(
+            source="codex",
+            session_id="session-1",
+            location=SourceLocation(8),
+            timestamp="2026-07-20T01:00:07Z",
+            role="assistant",
+            text_blocks=(),
+            tool_calls=(ToolCallSummary("exec", "Ran code"),),
+        ),
+    )
+
+    content = render_session(_session(*events, source="codex"))[0].content
+
+    activity_positions = [
+        match.start() for match in re.finditer(r"^## Tool activity$", content, re.M)
+    ]
+    assert len(activity_positions) == 3
+    assert "- Ran code (2 reports)" in content
+    assert "- Searched the web" in content
+    assert (
+        activity_positions[0]
+        < content.index("Checkpoint explanation")
+        < activity_positions[1]
+        < content.index("## Context boundary")
+        < activity_positions[2]
+    )
+
+
 @given(st.text())
 def test_normalization_is_idempotent_and_has_no_trailing_whitespace(
     value: str,

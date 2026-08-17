@@ -43,7 +43,7 @@ from .scanner_resolution import UnavailableGitleaksScanner, resolve_gitleaks
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-_STATE_VERSION = 3
+_STATE_VERSION = 4
 
 
 class CandidateScanner(Protocol):

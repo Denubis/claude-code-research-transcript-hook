@@ -152,7 +152,7 @@ def test_previous_state_version_cannot_skip_changed_rendering_contract(
         scanner=_CleanScanner(),
     )
     previous = json.loads(state.read_text(encoding="utf-8"))
-    previous["version"] = 2
+    previous["version"] = 3
     state.write_text(json.dumps(previous), encoding="utf-8")
     loader = _CountingLoader()
 

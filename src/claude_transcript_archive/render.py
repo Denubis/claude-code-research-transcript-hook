@@ -197,6 +197,57 @@ def _add_turn(lines: _Lines, turn: Turn) -> None:
     lines.blank()
 
 
+def _is_tool_only_turn(turn: Turn) -> bool:
+    return (
+        turn.role == "assistant"
+        and not turn.text_blocks
+        and bool(turn.tool_calls)
+        and turn.harness_identification is None
+    )
+
+
+def _add_tool_activity(lines: _Lines, turns: tuple[Turn, ...]) -> None:
+    first = turns[0]
+    last = turns[-1]
+    timestamps = tuple(turn.timestamp for turn in turns if turn.timestamp is not None)
+    if not timestamps:
+        timestamp_range = "unavailable"
+    elif timestamps[0] == timestamps[-1]:
+        timestamp_range = timestamps[0]
+    else:
+        timestamp_range = f"{timestamps[0]} through {timestamps[-1]}"
+    source_range = (
+        first.location.label
+        if first.location == last.location
+        else f"line {first.location.order} through line {last.location.order}"
+    )
+
+    lines.add("## Tool activity", source=first.location)
+    lines.add(
+        f"- Timestamps: {timestamp_range}",
+        f"- Sources: {source_range}",
+        source=first.location,
+    )
+    if first.source == "claude":
+        branches = tuple(dict.fromkeys(turn.branch for turn in turns if turn.branch is not None))
+        lines.add(
+            f"- Branch evidence: {', '.join(branches) if branches else 'unavailable'}",
+            source=first.location,
+        )
+
+    summaries: dict[str, tuple[int, SourceLocation]] = {}
+    for turn in turns:
+        for tool in turn.tool_calls:
+            summary = normalize_text(tool.summary).replace("\n", " ")
+            count, location = summaries.get(summary, (0, turn.location))
+            summaries[summary] = (count + 1, location)
+    lines.add("### Visible tool reports", source=first.location)
+    for summary, (count, location) in summaries.items():
+        suffix = f" ({count} reports)" if count > 1 else ""
+        lines.add(f"- {summary}{suffix}", source=location)
+    lines.blank()
+
+
 def _add_boundary(lines: _Lines, boundary: Boundary) -> None:
     lines.add("## Context boundary", source=boundary.location)
     lines.add(
@@ -289,11 +340,22 @@ def _render_part(
     lines.add("# Transcript")
     lines.blank()
     _add_source_evidence(lines, session)
+    tool_activity: list[Turn] = []
     for event in events:
+        if isinstance(event, Omission):
+            continue
+        if isinstance(event, Turn) and _is_tool_only_turn(event):
+            tool_activity.append(event)
+            continue
+        if tool_activity:
+            _add_tool_activity(lines, tuple(tool_activity))
+            tool_activity.clear()
         if isinstance(event, Turn):
             _add_turn(lines, event)
         elif isinstance(event, Boundary):
             _add_boundary(lines, event)
+    if tool_activity:
+        _add_tool_activity(lines, tuple(tool_activity))
     _add_omissions(lines, events)
     _add_redactions(lines, session, events)
     content, sources = lines.finish()
