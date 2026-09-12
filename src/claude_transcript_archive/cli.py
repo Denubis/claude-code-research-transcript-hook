@@ -15,6 +15,22 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from .annotations import (
+    DEFAULT_ANNOTATION_MODEL,
+    AnnotationError,
+    AnnotationSidecar,
+    annotation_json_schema,
+    annotation_prompt,
+    load_sidecar,
+    parse_agy_envelope,
+    render_annotation,
+    reviewed_sidecar,
+    sidecar_fingerprint,
+    sidecar_json,
+    source_locators,
+    strip_annotation_section,
+    transcript_digest,
+)
 from .claude import adapt_claude_records, sidechain_shard_omission
 from .codex import adapt_codex_records, subagent_rollout_omission
 from .discovery import (
@@ -27,13 +43,14 @@ from .discovery import (
     inspect_repository,
     load_raw_records,
 )
-from .model import ArchiveError, Omission, RawRecord, Session, SourceLocation
+from .model import ArchiveError, Omission, RawRecord, Session, SourceLocation, SourceTool
 from .redaction import (
     GitleaksScanner,
     ProcessResult,
     ProcessRunner,
     RedactionRule,
     SecretFinding,
+    normalize_scanner_error,
     parse_redactions,
     redact_records,
 )
@@ -43,7 +60,7 @@ from .scanner_resolution import UnavailableGitleaksScanner, resolve_gitleaks
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-_STATE_VERSION = 4
+_STATE_VERSION = 5
 
 
 class CandidateScanner(Protocol):
@@ -88,6 +105,7 @@ class SubprocessRunner:
         *,
         input_text: str | None = None,
         timeout_seconds: int,
+        cwd: Path | None = None,
     ) -> ProcessResult:
         """Capture one text process result."""
         try:
@@ -97,6 +115,7 @@ class SubprocessRunner:
                 text=True,
                 capture_output=True,
                 check=False,
+                cwd=cwd,
                 timeout=timeout_seconds,
             )
         except FileNotFoundError:
@@ -211,6 +230,7 @@ def _can_skip(
     source: SourceDescriptor,
     stamps: tuple[tuple[Path, SourceStamp], ...],
     fingerprint: str,
+    annotation_fingerprint: str | None,
     entry: object,
     archive_root: Path,
 ) -> bool:
@@ -221,6 +241,7 @@ def _can_skip(
         entry_value.get("path") == str(source.path)
         and entry_value.get("inputs") == _stamp_state(stamps)
         and entry_value.get("redactions") == fingerprint
+        and entry_value.get("annotations") == annotation_fingerprint
         and entry_value.get("recovered_working_directories")
         == list(source.recovered_working_directories)
         and _outputs_exist(entry_value, archive_root)
@@ -282,6 +303,161 @@ def _temporary_file(session_directory: Path, content: str) -> Path:
         target.flush()
         os.fsync(target.fileno())
         return Path(target.name)
+
+
+def _annotation_part(part: RenderedPart, sidecar: AnnotationSidecar) -> RenderedPart:
+    content = render_annotation(part.content, sidecar)
+    added_lines = len(content.splitlines()) - len(part.content.splitlines())
+    anchor_line = part.content.splitlines().index("# Transcript") + 1
+    sources = (
+        part.line_sources[:anchor_line] + ((None,) * added_lines) + part.line_sources[anchor_line:]
+    )
+    return RenderedPart(
+        filename=part.filename,
+        content=content,
+        line_sources=sources,
+    )
+
+
+def _load_current_annotation(
+    path: Path,
+    transcript: str,
+    source: SourceDescriptor,
+) -> AnnotationSidecar | None:
+    if not path.is_file():
+        return None
+    sidecar = load_sidecar(path, transcript, validate_locators=False)
+    if sidecar.source_tool != source.tool or sidecar.session_id != source.session_id:
+        raise AnnotationError("Annotation sidecar source identity does not match its directory")
+    if sidecar.base_transcript_sha256 != transcript_digest(transcript):
+        return None
+    return load_sidecar(path, transcript)
+
+
+def _candidate_part(filename: str, content: str) -> RenderedPart:
+    return RenderedPart(
+        filename=filename,
+        content=content,
+        line_sources=tuple(None for _ in content.splitlines()),
+    )
+
+
+def _annotation_scanner(
+    explicit: str | None,
+    runner: ProcessRunner,
+) -> CandidateScanner:
+    resolution = resolve_gitleaks(
+        explicit,
+        environment=os.environ,
+        home=Path.home(),
+    )
+    if resolution.executable is None:
+        return UnavailableGitleaksScanner(resolution.failure_message)
+    return GitleaksScanner(executable=resolution.executable, runner=runner)
+
+
+def _agy_version(agy: str, runner: ProcessRunner) -> str | None:
+    result = runner.run((agy, "--version"), timeout_seconds=10)
+    if result.returncode != 0:
+        return None
+    value = " ".join(result.stdout.split())
+    return value or None
+
+
+def _agy_failure_detail(result: ProcessResult) -> str:
+    try:
+        envelope = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        envelope = None
+    if isinstance(envelope, dict):
+        error = envelope.get("error")
+        if isinstance(error, str) and error.strip():
+            return normalize_scanner_error(error)
+    return normalize_scanner_error(result.stderr or result.stdout)
+
+
+def _request_annotation(
+    transcript: Path,
+    *,
+    source: SourceDescriptor,
+    agy: str,
+    model: str,
+    runner: ProcessRunner,
+) -> AnnotationSidecar:
+    base = strip_annotation_section(transcript.read_text(encoding="utf-8"))
+    schema = (
+        json.dumps(
+            annotation_json_schema(source_locators(base)),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="transcript-annotation-") as temporary:
+        isolated_directory = Path(temporary)
+        schema_path = isolated_directory / "annotation-schema.json"
+        schema_path.write_text(schema, encoding="utf-8")
+        result = runner.run(
+            (
+                agy,
+                "--mode",
+                "plan",
+                "--sandbox",
+                "--model",
+                model,
+                "--output-format",
+                "json",
+                "--json-schema",
+                str(schema_path),
+                "--disable-slash-commands",
+                "--print-timeout",
+                "2m",
+            ),
+            input_text=annotation_prompt(base),
+            timeout_seconds=120,
+            cwd=isolated_directory,
+        )
+    if result.returncode != 0:
+        detail = _agy_failure_detail(result)
+        raise AnnotationError(f"Agy exited {result.returncode}: {detail}")
+    try:
+        envelope = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise AnnotationError("Agy did not return one valid JSON envelope") from error
+    return parse_agy_envelope(
+        envelope,
+        transcript=base,
+        source_tool=source.tool,
+        session_id=source.session_id,
+        requested_model=model,
+        agy_version=_agy_version(agy, runner),
+    )
+
+
+def _publish_annotation(
+    transcript: Path,
+    sidecar_path: Path,
+    *,
+    rendered: str,
+    sidecar_content: str,
+) -> None:
+    original_transcript = transcript.read_text(encoding="utf-8")
+    transcript_temporary = _temporary_file(transcript.parent, rendered)
+    sidecar_temporary = _temporary_file(transcript.parent, sidecar_content)
+    try:
+        transcript_temporary.replace(transcript)
+        try:
+            sidecar_temporary.replace(sidecar_path)
+        except OSError:
+            restoration = _temporary_file(transcript.parent, original_transcript)
+            try:
+                restoration.replace(transcript)
+            finally:
+                restoration.unlink(missing_ok=True)
+            raise
+    finally:
+        transcript_temporary.unlink(missing_ok=True)
+        sidecar_temporary.unlink(missing_ok=True)
 
 
 _THREE_PS_KEYS = (
@@ -366,8 +542,15 @@ def update_three_ps(
         current[1] if process is None else process,
         current[2] if provenance is None else provenance,
     )
+    base = strip_annotation_section(transcript.read_text(encoding="utf-8"))
+    sidecar_path = transcript.parent / "annotations.json"
+    current_sidecar: AnnotationSidecar | None = None
+    if sidecar_path.is_file():
+        candidate = load_sidecar(sidecar_path, base, validate_locators=False)
+        if candidate.base_transcript_sha256 == transcript_digest(base):
+            current_sidecar = load_sidecar(sidecar_path, base)
     updated = _set_front_matter_values(
-        transcript.read_text(encoding="utf-8"),
+        base,
         {
             "prompt_summary": summaries[0],
             "process_summary": summaries[1],
@@ -375,6 +558,18 @@ def update_three_ps(
             "needs_review": not all(value.strip() for value in summaries),
         },
     )
+    if current_sidecar is not None:
+        updated_sidecar = replace(
+            current_sidecar,
+            base_transcript_sha256=transcript_digest(updated),
+        )
+        _publish_annotation(
+            transcript,
+            sidecar_path,
+            rendered=render_annotation(updated, updated_sidecar),
+            sidecar_content=sidecar_json(updated_sidecar),
+        )
+        return
     temporary = _temporary_file(transcript.parent, updated)
     try:
         temporary.replace(transcript)
@@ -426,6 +621,7 @@ def _state_entry(
     source: SourceDescriptor,
     stamps: tuple[tuple[Path, SourceStamp], ...],
     fingerprint: str,
+    annotation_fingerprint: str | None,
     outputs: tuple[Path, ...],
     archive_root: Path,
 ) -> dict[str, object]:
@@ -433,6 +629,7 @@ def _state_entry(
         "path": str(source.path),
         "inputs": _stamp_state(stamps),
         "redactions": fingerprint,
+        "annotations": annotation_fingerprint,
         "recovered_working_directories": list(source.recovered_working_directories),
         "outputs": [str(output.relative_to(archive_root)) for output in sorted(outputs)],
     }
@@ -494,6 +691,14 @@ def _generate_one(
         needs_review=not all(value.strip() for value in (prompt, process, provenance)),
     )
     parts = render_session(session)
+    sidecar_path = transcript.parent / "annotations.json"
+    current_annotation = _load_current_annotation(
+        sidecar_path,
+        parts[0].content,
+        source,
+    )
+    if current_annotation is not None:
+        parts = (_annotation_part(parts[0], current_annotation),)
     _scan_parts(parts, scanner)
     outputs = _publish_parts(source, parts, archive_root)
     return outputs, sum(len(part.content.encode()) for part in parts)
@@ -539,11 +744,15 @@ def generate_sources(
         try:
             stamps = _current_stamps(source)
             fingerprint = _rule_fingerprint(rules, source)
+            annotation_fingerprint = sidecar_fingerprint(
+                _safe_session_directory(archive_root, source) / "annotations.json"
+            )
             previous_entry = previous_sources.get(key)
             if _can_skip(
                 source,
                 stamps,
                 fingerprint,
+                annotation_fingerprint,
                 previous_entry,
                 archive_root,
             ):
@@ -562,6 +771,9 @@ def generate_sources(
                 source,
                 final_stamps,
                 fingerprint,
+                sidecar_fingerprint(
+                    _safe_session_directory(archive_root, source) / "annotations.json"
+                ),
                 outputs,
                 archive_root,
             )
@@ -598,7 +810,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("generate", "update"),
+        choices=("generate", "update", "annotate", "review-annotations"),
         default="generate",
     )
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -625,6 +837,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--process")
     parser.add_argument("--provenance")
     parser.add_argument("--metadata-file", type=Path)
+    parser.add_argument("--agy", default="agy")
+    parser.add_argument("--model", default=DEFAULT_ANNOTATION_MODEL)
     parser.add_argument("--redactions", type=Path)
     parser.add_argument(
         "--gitleaks",
@@ -734,6 +948,109 @@ def _run_update(options: argparse.Namespace) -> int:
     return 0
 
 
+def _annotation_source(options: argparse.Namespace) -> SourceDescriptor | None:
+    if options.tool is None or options.session_id is None:
+        return None
+    return SourceDescriptor(
+        tool=cast("SourceTool", options.tool),
+        session_id=options.session_id,
+        path=Path("unused"),
+        working_directories=(),
+        stamp=SourceStamp(size=0, mtime_ns=0),
+    )
+
+
+def _archive_root(options: argparse.Namespace, runner: ProcessRunner) -> Path:
+    if options.archive_root is not None:
+        return options.archive_root
+    return inspect_repository(options.repo, runner=runner).root / "ai_transcripts"
+
+
+def _annotation_paths(
+    options: argparse.Namespace,
+    runner: ProcessRunner,
+    source: SourceDescriptor,
+) -> tuple[Path, Path]:
+    session_directory = _safe_session_directory(_archive_root(options, runner), source)
+    return session_directory / "transcript.md", session_directory / "annotations.json"
+
+
+def _run_annotate(options: argparse.Namespace) -> int:
+    source = _annotation_source(options)
+    if source is None:
+        sys.stderr.write("annotate requires --tool and --session-id\n")
+        return 1
+    runner: ProcessRunner = SubprocessRunner()
+    transcript, sidecar_path = _annotation_paths(options, runner, source)
+    try:
+        sidecar = _request_annotation(
+            transcript,
+            source=source,
+            agy=options.agy,
+            model=options.model,
+            runner=runner,
+        )
+        current = transcript.read_text(encoding="utf-8")
+        rendered = render_annotation(current, sidecar)
+        sidecar_content = sidecar_json(sidecar)
+        scanner = _annotation_scanner(options.gitleaks, runner)
+        _scan_parts(
+            (
+                _candidate_part("transcript.md", rendered),
+                _candidate_part("annotations.json", sidecar_content),
+            ),
+            scanner,
+        )
+        _publish_annotation(
+            transcript,
+            sidecar_path,
+            rendered=rendered,
+            sidecar_content=sidecar_content,
+        )
+    except (ArchiveError, OSError, ValueError) as error:
+        sys.stderr.write(f"annotate failed: {error}\n")
+        return 1
+    sys.stdout.write(f"annotated={source.tool}/{source.session_id}\n")
+    return 0
+
+
+def _run_review_annotations(options: argparse.Namespace) -> int:
+    source = _annotation_source(options)
+    if source is None:
+        sys.stderr.write("review-annotations requires --tool and --session-id\n")
+        return 1
+    runner: ProcessRunner = SubprocessRunner()
+    transcript, sidecar_path = _annotation_paths(options, runner, source)
+    try:
+        current = transcript.read_text(encoding="utf-8")
+        base = strip_annotation_section(current)
+        sidecar = load_sidecar(sidecar_path, base)
+        if sidecar.source_tool != source.tool or sidecar.session_id != source.session_id:
+            raise AnnotationError("Annotation sidecar source identity does not match its directory")
+        reviewed = reviewed_sidecar(sidecar)
+        rendered = render_annotation(current, reviewed)
+        sidecar_content = sidecar_json(reviewed)
+        scanner = _annotation_scanner(options.gitleaks, runner)
+        _scan_parts(
+            (
+                _candidate_part("transcript.md", rendered),
+                _candidate_part("annotations.json", sidecar_content),
+            ),
+            scanner,
+        )
+        _publish_annotation(
+            transcript,
+            sidecar_path,
+            rendered=rendered,
+            sidecar_content=sidecar_content,
+        )
+    except (ArchiveError, OSError, ValueError) as error:
+        sys.stderr.write(f"review-annotations failed: {error}\n")
+        return 1
+    sys.stdout.write(f"reviewed-annotations={source.tool}/{source.session_id}\n")
+    return 0
+
+
 def _run_generate(options: argparse.Namespace) -> int:
     missing_roots = missing_source_roots(
         options.claude_root,
@@ -797,7 +1114,13 @@ def _run_generate(options: argparse.Namespace) -> int:
 def main(arguments: Sequence[str] | None = None) -> int:
     """Run deterministic discovery and generation."""
     options = _parser().parse_args(arguments)
-    return _run_update(options) if options.command == "update" else _run_generate(options)
+    if options.command == "update":
+        return _run_update(options)
+    if options.command == "annotate":
+        return _run_annotate(options)
+    if options.command == "review-annotations":
+        return _run_review_annotations(options)
+    return _run_generate(options)
 
 
 if __name__ == "__main__":

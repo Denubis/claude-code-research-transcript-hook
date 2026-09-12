@@ -9,7 +9,7 @@ worktrees when repository evidence can recover their membership.
 
 ## Output contract
 
-Each parent session produces exactly one file:
+Each parent session always produces one transcript:
 
 ```text
 ai_transcripts/sessions/<claude|codex>/<session-id>/transcript.md
@@ -20,8 +20,19 @@ Ps, and whether those summaries still need human review. The body contains the
 human/main-agent dialogue, concise visible tool reports, context boundaries, and
 an explicit omission/redaction ledger.
 
+An explicit annotation pass may also create:
+
+```text
+ai_transcripts/sessions/<claude|codex>/<session-id>/annotations.json
+```
+
+The sidecar keeps the Agy model and conversation provenance, its base-transcript
+digest, review status, Three-Ps drafts, decisions, affected artifacts, and
+source-locator-bound findings. Current annotations render compactly near the top
+of `transcript.md`; stale sidecars remain available but are not rendered.
+
 Subagent transcripts are validated and counted but are not copied into the
-dialogue. Private reasoning, raw JSONL, HTML, PDFs, and metadata sidecars are not
+dialogue. Private reasoning, raw JSONL, HTML, PDFs, and provider metadata are not
 archived. The provider's local JSONL remains the source of record named in the
 Markdown frontmatter.
 
@@ -50,6 +61,39 @@ store. Generation is incremental; unchanged source sessions are skipped.
 Gitleaks is required and resolved from `--gitleaks`, `GITLEAKS`, `PATH`, or the
 configured pre-commit environment. Generation fails closed if no scanner is
 available or a rendered candidate contains a secret finding.
+
+## Annotate a transcript
+
+After generation, ask Agy to annotate only the rendered, redacted transcript:
+
+```bash
+claude-research-transcript annotate \
+  --repo . \
+  --tool claude \
+  --session-id <session-id>
+```
+
+The default model is `gemini-3.7-flash-medium`; use `--model` to select another
+installed Agy model. Agy runs headlessly in plan and sandbox modes from an
+isolated temporary directory with a strict JSON schema. The rendered transcript
+is supplied through stdin; neither the archive nor repository is added to Agy's
+workspace. Its structured result is revalidated locally, including every source
+locator, and both resulting files are scanned with Gitleaks before publication.
+Agy errors, quota exhaustion, malformed output, invented locators, or scanner
+failures leave the transcript and sidecar unchanged.
+
+After human review of the rendered annotation and permanent sidecar, record the
+transition explicitly:
+
+```bash
+claude-research-transcript review-annotations \
+  --repo . \
+  --tool claude \
+  --session-id <session-id>
+```
+
+Annotation findings may identify `.notes` or ADR candidates, but the command
+never creates either artifact.
 
 ## Review the Three Ps
 

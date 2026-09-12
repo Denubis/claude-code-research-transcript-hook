@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 
 from .model import (
@@ -75,6 +76,7 @@ class ProcessRunner(Protocol):
         *,
         input_text: str | None = None,
         timeout_seconds: int,
+        cwd: Path | None = None,
     ) -> ProcessResult:
         """Run one process without a shell."""
 

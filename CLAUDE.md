@@ -10,11 +10,14 @@ searchable Markdown transcript per session.
 - `model.py` owns the provider-neutral session and evidence types.
 - `redaction.py` and `scanner_resolution.py` apply overlays and fail-closed Gitleaks checks.
 - `render.py` renders one `transcript.md` with Three-Ps frontmatter and omission evidence.
+- `annotations.py` validates Agy output, source locators, sidecars, and compact annotation blocks.
 - `cli.py` owns incremental generation, atomic publication, and Three-Ps updates.
 
-The archive does not copy raw JSONL, HTML, PDFs, metadata sidecars, private
-reasoning, or subagent dialogue. Subagent sources are validated and represented
-only by omission counts.
+The archive does not copy raw JSONL, HTML, PDFs, private reasoning, or subagent
+dialogue. An explicit post-generation annotation may add `annotations.json` beside
+the transcript. Agy receives only the rendered and Gitleaks-scanned Markdown through
+stdin while running from an isolated temporary directory; the archive and repository
+are not added to its workspace.
 
 ## Commands
 

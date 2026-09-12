@@ -1,6 +1,7 @@
 """Behavioral and property tests for transcript redaction policy."""
 
 import json
+from pathlib import Path
 
 import pytest
 from hypothesis import given
@@ -29,8 +30,10 @@ class _FindingRunner:
         *,
         input_text: str | None = None,
         timeout_seconds: int,
+        cwd: Path | None = None,
     ) -> ProcessResult:
         assert timeout_seconds == 30
+        assert cwd is None
         self.arguments = arguments
         self.input_text = input_text
         report = [
