@@ -1,6 +1,7 @@
 """Hermetic generation and contributor CLI tests."""
 
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -744,3 +745,65 @@ def test_discovery_exclusions_are_reported_without_source_content() -> None:
         "exclusion codex/session-1: different Git common directory "
         "[/local/rollout.jsonl]\n"
     )
+
+
+def test_generate_renders_other_sessions_when_one_source_has_an_invalid_line(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repository = tmp_path / "repository"
+    claude_root = tmp_path / "claude"
+    codex_root = tmp_path / "codex"
+    archive = tmp_path / "archive"
+    codex_root.mkdir()
+    subprocess.run(("git", "init", "--quiet", str(repository)), check=True)
+    gitleaks = tmp_path / "gitleaks"
+    gitleaks.write_text("#!/bin/sh\necho '[]'\n", encoding="utf-8")
+    gitleaks.chmod(0o755)
+    record = {
+        "type": "user",
+        "uuid": "user-1",
+        "timestamp": "2026-07-20T01:00:00Z",
+        "cwd": str(repository),
+        "message": {"role": "user", "content": "visible request"},
+    }
+    project = claude_root / "project"
+    project.mkdir(parents=True)
+    (project / "healthy.jsonl").write_text(
+        json.dumps({**record, "sessionId": "healthy"}) + "\n",
+        encoding="utf-8",
+    )
+    (project / "torn.jsonl").write_text(
+        json.dumps({**record, "sessionId": "torn"}) + '\n{"type":"user","message":"cut off\n',
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--repo",
+            str(repository),
+            "--claude-root",
+            str(claude_root),
+            "--codex-root",
+            str(codex_root),
+            "--archive-root",
+            str(archive),
+            "--gitleaks",
+            str(gitleaks),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    healthy = archive / "sessions" / "claude" / "healthy" / "transcript.md"
+    assert exit_code == 1
+    assert "visible request" in healthy.read_text(encoding="utf-8")
+    assert not (archive / "sessions" / "claude" / "torn").exists()
+    assert "rendered=1" in captured.out
+    assert "failed=1" in captured.out
+    failure_lines = [
+        line for line in captured.out.splitlines() if line.startswith("failure claude/torn:")
+    ]
+    assert len(failure_lines) == 1
+    assert "torn.jsonl" in failure_lines[0]
+    assert "line 2" in failure_lines[0]
+    assert "cut off" not in captured.out + captured.err

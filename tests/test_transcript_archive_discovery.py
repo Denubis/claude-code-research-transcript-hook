@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from claude_transcript_archive.discovery import (
-    DiscoveryError,
+    DiscoveryResult,
     RepositoryIdentity,
     discover_sessions,
     discover_sessions_cached,
@@ -729,24 +729,37 @@ def test_malformed_unrelated_source_does_not_abort_repository_discovery(
     assert result.sources == ()
 
 
-def test_malformed_matched_source_fails_with_line(tmp_path: Path) -> None:
-    repository = tmp_path / "google-live"
-    repository.mkdir()
-    common_dir = tmp_path / "common.git"
-    claude_root = tmp_path / "claude"
-    malformed = claude_root / "project" / "broken.jsonl"
-    malformed.parent.mkdir(parents=True)
-    malformed.write_text(
+def _write_torn_claude_source(path: Path, repository: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(
             {
                 "type": "user",
-                "sessionId": "broken",
+                "sessionId": path.stem,
                 "cwd": str(repository),
                 "message": {"content": "ours"},
             }
         )
         + "\n{broken\n",
         encoding="utf-8",
+    )
+
+
+def test_malformed_matched_source_fails_alone_with_line(tmp_path: Path) -> None:
+    repository = tmp_path / "google-live"
+    repository.mkdir()
+    common_dir = tmp_path / "common.git"
+    claude_root = tmp_path / "claude"
+    malformed = claude_root / "project" / "broken.jsonl"
+    _write_torn_claude_source(malformed, repository)
+    _write_jsonl(
+        claude_root / "project" / "healthy.jsonl",
+        {
+            "type": "user",
+            "sessionId": "healthy",
+            "cwd": str(repository),
+            "message": {"content": "ours"},
+        },
     )
     resolver = _Resolver({repository: common_dir})
     identity = RepositoryIdentity(
@@ -756,13 +769,99 @@ def test_malformed_matched_source_fails_with_line(tmp_path: Path) -> None:
         normalized_remotes=(),
     )
 
-    with pytest.raises(DiscoveryError, match=r"broken\.jsonl.*line 2"):
-        discover_sessions(
+    result = discover_sessions(
+        identity,
+        resolver=resolver,
+        claude_root=claude_root,
+        codex_root=tmp_path / "codex",
+    )
+
+    assert [source.session_id for source in result.sources] == ["healthy"]
+    assert [(failure.tool, failure.session_id, failure.path) for failure in result.failures] == [
+        ("claude", "broken", malformed)
+    ]
+    assert "broken.jsonl" in result.failures[0].reason
+    assert "line 2" in result.failures[0].reason
+
+
+def test_unclassifiable_codex_source_fails_alone(tmp_path: Path) -> None:
+    repository = tmp_path / "google-live"
+    repository.mkdir()
+    common_dir = tmp_path / "common.git"
+    codex_root = tmp_path / "codex"
+    headless = codex_root / "2026" / "headless.jsonl"
+    _write_jsonl(headless, {"type": "turn_context", "payload": {"cwd": str(repository)}})
+    _write_jsonl(
+        codex_root / "2026" / "rollout.jsonl",
+        {
+            "type": "session_meta",
+            "payload": {"id": "codex-main", "cwd": str(repository)},
+        },
+    )
+    resolver = _Resolver({repository: common_dir})
+    identity = RepositoryIdentity(
+        root=repository,
+        common_git_dir=common_dir,
+        worktrees=(repository,),
+        normalized_remotes=(),
+    )
+
+    result = discover_sessions(
+        identity,
+        resolver=resolver,
+        claude_root=tmp_path / "claude",
+        codex_root=codex_root,
+    )
+
+    assert [source.session_id for source in result.sources] == ["codex-main"]
+    assert [(failure.tool, failure.path) for failure in result.failures] == [("codex", headless)]
+    assert "session_meta" in result.failures[0].reason
+
+
+def test_cached_discovery_keeps_reporting_a_malformed_source_until_repaired(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "google-live"
+    repository.mkdir()
+    common_dir = tmp_path / "common.git"
+    claude_root = tmp_path / "claude"
+    malformed = claude_root / "project" / "broken.jsonl"
+    _write_torn_claude_source(malformed, repository)
+    resolver = _Resolver({repository: common_dir})
+    identity = RepositoryIdentity(
+        root=repository,
+        common_git_dir=common_dir,
+        worktrees=(repository,),
+        normalized_remotes=(),
+    )
+    cache = tmp_path / "archive" / ".discovery.json"
+
+    def discover() -> DiscoveryResult:
+        return discover_sessions_cached(
             identity,
             resolver=resolver,
             claude_root=claude_root,
             codex_root=tmp_path / "codex",
+            cache_path=cache,
         )
+
+    first = discover()
+    second = discover()
+    _write_jsonl(
+        malformed,
+        {
+            "type": "user",
+            "sessionId": "broken",
+            "cwd": str(repository),
+            "message": {"content": "ours, repaired with a longer line"},
+        },
+    )
+    repaired = discover()
+
+    assert [failure.session_id for failure in first.failures] == ["broken"]
+    assert second == first
+    assert repaired.failures == ()
+    assert [source.session_id for source in repaired.sources] == ["broken"]
 
 
 @pytest.mark.parametrize(

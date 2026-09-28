@@ -1093,6 +1093,9 @@ def _run_generate(options: argparse.Namespace) -> int:
             exclusions=tuple(
                 exclusion for exclusion in discovery.exclusions if exclusion.tool == options.source
             ),
+            failures=tuple(
+                failure for failure in discovery.failures if failure.tool == options.source
+            ),
         )
     redactions_path = options.redactions or archive_root / "redactions.toml"
     rules = (
@@ -1107,6 +1110,19 @@ def _run_generate(options: argparse.Namespace) -> int:
         / (".state.json" if options.source == "all" else f".state-{options.source}.json"),
         rules=rules,
         scanner=scanner,
+    )
+    unreadable = tuple(
+        SourceFailure(
+            tool=failure.tool,
+            session_id=failure.session_id,
+            reason=failure.reason,
+        )
+        for failure in discovery.failures
+    )
+    result = replace(
+        result,
+        discovered=result.discovered + len(unreadable),
+        failures=(*unreadable, *result.failures),
     )
     sys.stdout.write(format_discovery_exclusions(discovery.exclusions))
     sys.stdout.write(_report(result))

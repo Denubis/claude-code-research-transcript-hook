@@ -72,11 +72,22 @@ class DiscoveryExclusion:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryFailure:
+    """A source file that could not be classified or read completely."""
+
+    tool: SourceTool
+    session_id: str
+    path: Path
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     """All source sessions positively attributed to a repository."""
 
     sources: tuple[SourceDescriptor, ...]
     exclusions: tuple[DiscoveryExclusion, ...] = ()
+    failures: tuple[DiscoveryFailure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +100,7 @@ class _CodexCandidate:
 class _DiscoveryClassification:
     candidate: _CodexCandidate | None
     exclusion: DiscoveryExclusion | None
+    failure: DiscoveryFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,24 +486,21 @@ def discover_sessions(
     codex_root: Path,
 ) -> DiscoveryResult:
     """Discover every source session positively attributed to the repository."""
-    classifications: list[_DiscoveryClassification] = []
-    for path in _claude_session_files(claude_root):
-        descriptor = _claude_descriptor(path, identity, resolver)
-        candidate = (
-            _CodexCandidate(descriptor=descriptor, parent_session_id=None)
-            if descriptor is not None
-            else None
-        )
-        classifications.append(_DiscoveryClassification(candidate=candidate, exclusion=None))
-    for path in _jsonl_files(codex_root):
-        candidate, exclusion = _codex_descriptor(path, identity, resolver)
-        classifications.append(
-            _DiscoveryClassification(
-                candidate=candidate,
-                exclusion=exclusion,
+    candidates: tuple[tuple[SourceTool, Path], ...] = (
+        *(("claude", path) for path in _claude_session_files(claude_root)),
+        *(("codex", path) for path in _jsonl_files(codex_root)),
+    )
+    return _finalize_discovery(
+        [
+            _classify_source(
+                vendor=vendor,
+                path=path,
+                identity=identity,
+                resolver=resolver,
             )
-        )
-    return _finalize_discovery(classifications)
+            for vendor, path in candidates
+        ]
+    )
 
 
 def _finalize_discovery(
@@ -500,6 +509,7 @@ def _finalize_discovery(
     sources: list[SourceDescriptor] = []
     codex_sidechains: list[_CodexCandidate] = []
     exclusions: list[DiscoveryExclusion] = []
+    failures: list[DiscoveryFailure] = []
     for classification in classifications:
         candidate = classification.candidate
         if candidate is not None and candidate.parent_session_id is None:
@@ -508,6 +518,8 @@ def _finalize_discovery(
             codex_sidechains.append(candidate)
         if classification.exclusion is not None:
             exclusions.append(classification.exclusion)
+        if classification.failure is not None:
+            failures.append(classification.failure)
     sources = _attach_codex_sidechains(
         sources,
         codex_sidechains,
@@ -527,9 +539,11 @@ def _finalize_discovery(
             str(exclusion.path),
         )
     )
+    failures.sort(key=lambda failure: (failure.tool, failure.session_id, str(failure.path)))
     return DiscoveryResult(
         sources=tuple(sources),
         exclusions=tuple(exclusions),
+        failures=tuple(failures),
     )
 
 
@@ -712,6 +726,33 @@ def _classify_source(
     identity: RepositoryIdentity,
     resolver: RepositoryResolver,
 ) -> _DiscoveryClassification:
+    try:
+        return _classify_readable_source(
+            vendor=vendor,
+            path=path,
+            identity=identity,
+            resolver=resolver,
+        )
+    except DiscoveryError as error:
+        return _DiscoveryClassification(
+            candidate=None,
+            exclusion=None,
+            failure=DiscoveryFailure(
+                tool=vendor,
+                session_id=path.stem,
+                path=path,
+                reason=str(error),
+            ),
+        )
+
+
+def _classify_readable_source(
+    *,
+    vendor: SourceTool,
+    path: Path,
+    identity: RepositoryIdentity,
+    resolver: RepositoryResolver,
+) -> _DiscoveryClassification:
     if vendor == "claude":
         descriptor = _claude_descriptor(path, identity, resolver)
         candidate = (
@@ -794,12 +835,13 @@ def discover_sessions_cached(
                 identity=identity,
                 resolver=resolver,
             )
-        entries[str(path)] = _cache_entry(
-            vendor=vendor,
-            stamp=stamp,
-            shards=shards,
-            classification=classification,
-        )
+        if classification.failure is None:
+            entries[str(path)] = _cache_entry(
+                vendor=vendor,
+                stamp=stamp,
+                shards=shards,
+                classification=classification,
+            )
         classifications.append(classification)
     result = _finalize_discovery(classifications)
     _write_discovery_cache(cache_path, identity, entries)
