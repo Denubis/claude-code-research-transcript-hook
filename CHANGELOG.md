@@ -1,5 +1,14 @@
 # Changelog
 
+## transcript-archive 1.0.1
+
+One unreadable source log no longer stops every other session from rendering.
+
+**Fixed:**
+- A source file that cannot be classified or read completely, such as one with an invalid JSONL line, is now a per-source failure naming the file and line. Other sessions render and `generate` still exits 1. Previously the error aborted the run before anything rendered. Found via a Claude Code log in which two records shared one line and the first was cut off.
+- Unreadable sources are never recorded in the discovery cache, so they are reported on every run until repaired.
+- The package imports on Python 3.12 and 3.13 as `requires-python` declares. It previously raised `NameError` at import on anything older than 3.14.
+
 ## transcript-archive 1.0.0
 
 Breaking replacement of the ornate Claude-only export pipeline with a

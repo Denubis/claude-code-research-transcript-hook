@@ -39,7 +39,7 @@ def test_claude_codex_and_antigravity_expose_one_skill_tree() -> None:
     antigravity = _json(REPO_ROOT / "plugin.json")
     marketplace = _json(REPO_ROOT / ".agents" / "plugins" / "marketplace.json")
 
-    assert project["version"] == claude["version"] == codex["version"] == "1.0.0"
+    assert project["version"] == claude["version"] == codex["version"]
     assert claude["name"] == codex["name"] == antigravity["name"] == PLUGIN_NAME
     assert antigravity == {"name": PLUGIN_NAME}
     assert codex["skills"] == "./skills/"

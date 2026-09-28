@@ -1,6 +1,6 @@
 {
   "name": "transcript-archive",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Archive Claude Code and Codex sessions as searchable Markdown with Three-Ps metadata",
   "author": {
     "name": "Brian Ballsun-Stanton",
