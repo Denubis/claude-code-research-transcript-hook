@@ -3,6 +3,8 @@
 # pattern: Imperative Shell
 """
 
+from __future__ import annotations
+
 import dataclasses
 import json
 import tempfile
