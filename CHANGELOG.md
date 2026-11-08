@@ -1,5 +1,17 @@
 # Changelog
 
+## transcript-archive 1.0.2
+
+Sessions no longer fail when Claude Code writes new sub-agent records or when a transcript quotes a session or message ID.
+
+**New:**
+- The redaction overlay (`redactions.toml`) accepts `[[allowed_ids]]` entries, each one exact UUID with a one-line reason. Listed IDs are never treated as keys, in any session.
+
+**Fixed:**
+- A sub-agent file whose first record is `fork-context-ref` (a forked agent, naming its parent as `parentSessionId`) or that holds `api-request`, `api-request-blob` or `api-request-shape` records no longer fails the whole parent session. Every sub-agent record must still name the parent session; only `user` and `assistant` records must carry the sidechain marker.
+- Gitleaks no longer blocks a transcript that quotes a session or message ID. Exact UUIDs that source records assign themselves, and the IDs of the other sessions in the run, are hidden from the scanner and kept in the published transcript. A UUID inside a longer token, or one not proven an ID, is still scanned.
+- `annotate` and `review-annotations` re-read the source logs named in the transcript, so they treat the same IDs the same way.
+
 ## transcript-archive 1.0.1
 
 One unreadable source log no longer stops every other session from rendering.
