@@ -403,6 +403,205 @@ def test_claude_rejects_unknown_conversation_content() -> None:
         )
 
 
+_TYPED_MID_TURN = "blargh, can we just have an allowlist?"
+
+
+def _queued_message(
+    order: int,
+    prompt: object,
+    *,
+    origin: dict[str, object] | None,
+    command_mode: str | None = "prompt",
+    sidechain: bool = False,
+    version: str | None = "2.1.318",
+) -> RawRecord:
+    attachment: dict[str, object] = {"type": "queued_command", "prompt": prompt}
+    if origin is not None:
+        attachment["origin"] = origin
+    if command_mode is not None:
+        attachment["commandMode"] = command_mode
+    value: dict[str, object] = {
+        "type": "attachment",
+        "sessionId": "claude-session",
+        "uuid": f"queued-{order}",
+        "timestamp": f"2026-11-08T09:0{order}:00Z",
+        "gitBranch": "main",
+        "isSidechain": sidechain,
+        "attachment": attachment,
+    }
+    if version is not None:
+        value["version"] = version
+    return _raw(order, value)
+
+
+def _assistant_text(order: int, text: str) -> RawRecord:
+    return _raw(
+        order,
+        {
+            "type": "assistant",
+            "sessionId": "claude-session",
+            "uuid": f"assistant-{order}",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        },
+    )
+
+
+def test_claude_renders_a_message_typed_mid_turn_once_as_a_user_turn() -> None:
+    records = (
+        _assistant_text(1, "Working on the scanner."),
+        _raw(
+            2,
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "sessionId": "claude-session",
+                "content": _TYPED_MID_TURN,
+            },
+        ),
+        _raw(
+            3,
+            {
+                "type": "user",
+                "sessionId": "claude-session",
+                "uuid": "tool-result-3",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-1",
+                            "content": f"The user sent: {_TYPED_MID_TURN}",
+                        }
+                    ],
+                },
+            },
+        ),
+        _queued_message(4, _TYPED_MID_TURN, origin={"kind": "human"}),
+        _raw(
+            5,
+            {
+                "type": "queue-operation",
+                "operation": "remove",
+                "sessionId": "claude-session",
+                "content": _TYPED_MID_TURN,
+            },
+        ),
+        _assistant_text(6, "Adding the allowlist."),
+    )
+
+    session = adapt_claude_records(
+        records,
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert [
+        (turn.role, turn.text_blocks, turn.harness_identification, turn.location.order)
+        for turn in _turns(session.events)
+    ] == [
+        ("assistant", ("Working on the scanner.",), None, 1),
+        ("user", (_TYPED_MID_TURN,), None, 4),
+        ("assistant", ("Adding the allowlist.",), None, 6),
+    ]
+    assert render_session(session)[0].content.count(_TYPED_MID_TURN) == 1
+
+
+@pytest.mark.parametrize(
+    ("origin", "command_mode"),
+    (
+        ({"kind": "peer", "from": "uds:/run/user/1000/cc-socks/1.sock"}, "prompt"),
+        ({"kind": "task-notification"}, "task-notification"),
+        (None, "task-notification"),
+        ({"kind": "coordinator"}, None),
+        ({"kind": "auto-continuation"}, "prompt"),
+        (None, "prompt"),
+    ),
+    ids=("peer", "task", "unmarked-task", "coordinator", "auto-continuation", "unmarked"),
+)
+def test_claude_omits_queued_messages_not_marked_as_the_humans(
+    origin: dict[str, object] | None,
+    command_mode: str | None,
+) -> None:
+    session = adapt_claude_records(
+        (_queued_message(1, "Not typed by the human", origin=origin, command_mode=command_mode),),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert _turns(session.events) == []
+    assert _omission_counts(session.events) == {"operational": 1}
+
+
+@pytest.mark.parametrize("version", ("2.1.97", "2.1.179"))
+def test_claude_renders_unmarked_queued_prompts_from_before_sender_marking(version: str) -> None:
+    session = adapt_claude_records(
+        (_queued_message(1, "and fix all", origin=None, version=version),),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert [(turn.role, turn.text_blocks) for turn in _turns(session.events)] == [
+        ("user", ("and fix all",))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("version", "command_mode"),
+    (
+        ("2.1.180", "prompt"),
+        ("2.1.181", "prompt"),
+        (None, "prompt"),
+        ("2.1.100", "task-notification"),
+    ),
+    ids=("2.1.180", "2.1.181", "no-version", "old-task-notification"),
+)
+def test_claude_omits_other_unmarked_queued_records(
+    version: str | None,
+    command_mode: str,
+) -> None:
+    session = adapt_claude_records(
+        (
+            _queued_message(
+                1, "Not typed by the human", origin=None, command_mode=command_mode, version=version
+            ),
+        ),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert _turns(session.events) == []
+    assert _omission_counts(session.events) == {"operational": 1}
+
+
+def test_claude_keeps_a_queued_messages_text_and_records_its_image_omission() -> None:
+    prompt = [
+        {"type": "text", "text": "Look at this screenshot."},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}},
+    ]
+
+    session = adapt_claude_records(
+        (_queued_message(1, prompt, origin={"kind": "human"}),),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert [(turn.role, turn.text_blocks) for turn in _turns(session.events)] == [
+        ("user", ("Look at this screenshot.",))
+    ]
+    assert _omission_counts(session.events) == {"image": 1}
+
+
+def test_claude_does_not_render_a_queued_message_sent_to_a_sub_agent() -> None:
+    session = adapt_claude_records(
+        (_queued_message(1, "Sub-agent instruction", origin={"kind": "human"}, sidechain=True),),
+        session_id="claude-session",
+        source_path=Path("/source/claude-session.jsonl"),
+    )
+
+    assert _turns(session.events) == []
+    assert _omission_counts(session.events) == {"sidechain": 1}
+
+
 def test_codex_renders_only_canonical_human_and_main_agent_messages() -> None:
     records = (
         _raw(

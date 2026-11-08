@@ -20,6 +20,12 @@ Ps, and whether those summaries still need human review. The body contains the
 human/main-agent dialogue, concise visible tool reports, context boundaries, and
 an explicit omission/redaction ledger.
 
+A message the human types while Claude Code is still working is a human turn at
+the point Claude Code delivered it. Claude Code marks who sent each such message;
+only those marked as the human's are included, plus unmarked prompts written by
+Claude Code 2.1.179 or earlier, before it named senders. Messages from other
+sessions, task notices and coordinators are omitted.
+
 An explicit annotation pass may also create:
 
 ```text

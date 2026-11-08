@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Never, cast
 
 if TYPE_CHECKING:
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 from .model import (
     AdapterError,
     Boundary,
+    DialogueRole,
     HarnessIdentification,
     Omission,
     RawRecord,
@@ -38,6 +40,10 @@ _HARNESS_ENVELOPES = (
     "<command-message>",
 )
 _DIALOGUE_RECORD_TYPES = frozenset({"user", "assistant"})
+# Claude Code 2.1.179 and earlier wrote queued prompts without naming a sender;
+# Brian read a sample and ruled them his own words (2026-11-09).
+_LAST_VERSION_WITHOUT_SENDER = (2, 1, 179)
+_VERSION_PREFIX = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _OPERATIONAL_RECORD_TYPES = frozenset(
     {
         "agent-setting",
@@ -309,30 +315,37 @@ def _harness_identification(
     return None
 
 
+def _sidechain_events(
+    record: RawRecord,
+    session_id: str,
+    content: object,
+) -> list[TranscriptEvent]:
+    omissions: list[TranscriptEvent] = [
+        _omission(
+            record,
+            session_id,
+            "sidechain",
+            "Sidechain dialogue is not archived",
+        )
+    ]
+    if isinstance(content, list):
+        _, _, nested = _adapt_content_list(
+            record,
+            session_id,
+            cast("list[object]", content),
+            render_tools=False,
+        )
+        omissions.extend(nested)
+    return omissions
+
+
 def _adapt_dialogue(
     record: RawRecord,
     session_id: str,
 ) -> list[TranscriptEvent]:
     value = record.value
     if value.get("isSidechain") is True:
-        content = _message_content(record, session_id)
-        omissions: list[TranscriptEvent] = [
-            _omission(
-                record,
-                session_id,
-                "sidechain",
-                "Sidechain dialogue is not archived",
-            )
-        ]
-        if isinstance(content, list):
-            _, _, nested = _adapt_content_list(
-                record,
-                session_id,
-                cast("list[object]", content),
-                render_tools=False,
-            )
-            omissions.extend(nested)
-        return omissions
+        return _sidechain_events(record, session_id, _message_content(record, session_id))
     if value.get("isMeta") is True or value.get("isCompactSummary") is True:
         return [
             _omission(
@@ -342,8 +355,54 @@ def _adapt_dialogue(
                 "Injected or generated context is not dialogue",
             )
         ]
+    role = "user" if value.get("type") == "user" else "assistant"
+    return _content_events(record, session_id, _message_content(record, session_id), role=role)
 
-    content = _message_content(record, session_id)
+
+def _written_before_sender_marking(record: RawRecord) -> bool:
+    match = _VERSION_PREFIX.match(_optional_string(record.value.get("version")) or "")
+    if match is None:
+        return False
+    version = tuple(int(part) for part in match.groups())
+    return version <= _LAST_VERSION_WITHOUT_SENDER
+
+
+def _human_queued_attachment(record: RawRecord) -> dict[str, object] | None:
+    """Return the attachment of a message the human typed while Claude was working.
+
+    Claude Code stores it as a ``queued_command`` attachment. It is the human's
+    when its origin is ``human``, or when it is a prompt with no origin written
+    by a version from before Claude Code named senders. Messages from other
+    sessions, task notifications, coordinators, automatic continuations and
+    later unmarked records are not the human's words
+    (docs/decisions/2026-11-09-bb-human-queued-messages-only.md).
+    """
+    attachment = record.value.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+    attachment_value = cast("dict[str, object]", attachment)
+    if attachment_value.get("type") != "queued_command":
+        return None
+    origin = attachment_value.get("origin")
+    if isinstance(origin, dict):
+        is_human = cast("dict[str, object]", origin).get("kind") == "human"
+    else:
+        is_human = (
+            origin is None
+            and attachment_value.get("commandMode") == "prompt"
+            and _written_before_sender_marking(record)
+        )
+    return attachment_value if is_human else None
+
+
+def _content_events(
+    record: RawRecord,
+    session_id: str,
+    content: object,
+    *,
+    role: DialogueRole,
+) -> list[TranscriptEvent]:
+    value = record.value
     omissions: list[Omission] = []
     if isinstance(content, str):
         text = (content,)
@@ -358,8 +417,6 @@ def _adapt_dialogue(
     else:
         _unknown_block(record, session_id, type(content).__name__)
 
-    record_type = value.get("type")
-    role = "user" if record_type == "user" else "assistant"
     events: list[TranscriptEvent] = list(omissions)
     if text or tools:
         events.insert(
@@ -395,6 +452,11 @@ def _adapt_record(
     record_type = record.value.get("type")
     if record_type in {"user", "assistant"}:
         return _adapt_dialogue(record, session_id)
+    if record_type == "attachment" and (queued := _human_queued_attachment(record)) is not None:
+        prompt = queued.get("prompt")
+        if record.value.get("isSidechain") is True:
+            return _sidechain_events(record, session_id, prompt)
+        return _content_events(record, session_id, prompt, role="user")
     if record_type == "system" and record.value.get("subtype") == "compact_boundary":
         metadata = record.value.get("compactMetadata")
         trigger = (

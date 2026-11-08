@@ -6,6 +6,8 @@ Human rulings for the transcript archiver, each with a resolver to the original 
 
 - [2026-11-08: Annotation steps learn session and message IDs from the source log](2026-11-08-bb-annotation-reads-source-ids.md)
 - [2026-11-08: A hand-kept allowlist of IDs that are not keys](2026-11-08-bb-hand-kept-id-allowlist.md)
+- [2026-11-08: Messages typed mid-turn are archived as human dialogue](2026-11-08-bb-archive-mid-turn-messages.md)
+- [2026-11-09: Only the human's queued messages are archived](2026-11-09-bb-human-queued-messages-only.md)
 
 ## Rulings recorded elsewhere
 
