@@ -4,6 +4,9 @@ Human rulings for the transcript archiver, each with a resolver to the original 
 
 ## Rulings recorded here
 
+- [2026-08-17: Consecutive tool reports are grouped](2026-08-17-bb-group-tool-activity.md)
+- [2026-08-17: Agy annotates transcripts into a permanent sidecar](2026-08-17-bb-agy-annotation-sidecar.md)
+- [2026-09-26: Releases reach Claude Code through GitHub main](2026-09-26-bb-release-through-github-main.md)
 - [2026-11-08: Annotation steps learn session and message IDs from the source log](2026-11-08-bb-annotation-reads-source-ids.md)
 - [2026-11-08: A hand-kept allowlist of IDs that are not keys](2026-11-08-bb-hand-kept-id-allowlist.md)
 - [2026-11-08: Messages typed mid-turn are archived as human dialogue](2026-11-08-bb-archive-mid-turn-messages.md)
