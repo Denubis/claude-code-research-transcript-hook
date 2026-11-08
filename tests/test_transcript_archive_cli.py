@@ -396,6 +396,140 @@ def test_sidechain_shard_requires_canonical_parent_and_sidechain_marker(
     assert "is not marked isSidechain true" in missing_marker.failures[0].reason
 
 
+def _generate_one_source(
+    source: SourceDescriptor,
+    archive: Path,
+) -> tuple[transcript_archive_cli.GenerationResult, Path]:
+    result = generate_sources(
+        (source,),
+        archive_root=archive,
+        state_path=archive / ".state.json",
+        rules=(),
+        scanner=_CleanScanner(),
+    )
+    return result, archive / "sessions" / "claude" / "session-1" / "transcript.md"
+
+
+def test_sidechain_shard_accepts_fork_record_that_names_its_parent(
+    tmp_path: Path,
+) -> None:
+    source = _write_sidechain_shard(
+        _write_claude_source(tmp_path / "source.jsonl", "human dialogue"),
+        {
+            "type": "fork-context-ref",
+            "agentId": "worker",
+            "parentSessionId": "session-1",
+            "parentLastUuid": "user-1",
+            "contextLength": 1,
+        },
+        {
+            "type": "assistant",
+            "sessionId": "session-1",
+            "isSidechain": True,
+            "message": {"content": "forked sub-agent response"},
+        },
+    )
+
+    result, transcript = _generate_one_source(source, tmp_path / "archive")
+
+    assert result.failures == ()
+    output = transcript.read_text(encoding="utf-8")
+    assert "| sub-agent-traffic | 2 |" in output
+    assert "forked sub-agent response" not in output
+
+
+def test_sidechain_shard_rejects_fork_record_that_names_another_parent(
+    tmp_path: Path,
+) -> None:
+    source = _write_sidechain_shard(
+        _write_claude_source(tmp_path / "source.jsonl", "human dialogue"),
+        {
+            "type": "fork-context-ref",
+            "agentId": "worker",
+            "parentSessionId": "other-session",
+            "parentLastUuid": "user-1",
+            "contextLength": 1,
+        },
+    )
+
+    result, transcript = _generate_one_source(source, tmp_path / "archive")
+
+    assert result.failed == 1
+    assert not transcript.exists()
+
+
+def test_sidechain_shard_accepts_request_metadata_without_sidechain_marker(
+    tmp_path: Path,
+) -> None:
+    source = _write_sidechain_shard(
+        _write_claude_source(tmp_path / "source.jsonl", "human dialogue"),
+        {
+            "type": "api-request-shape",
+            "agentId": "worker",
+            "sessionId": "session-1",
+            "shape": {},
+            "shapeHash": "shape-1",
+            "timestamp": "2026-07-20T01:00:01Z",
+            "version": "2.1.0",
+        },
+        {
+            "type": "api-request",
+            "agentId": "worker",
+            "id": "request-1",
+            "cacheControl": {},
+            "keep": 0,
+            "params": {"system": "sub-agent request parameters"},
+            "querySource": "agent",
+            "requestDigest": "digest-1",
+            "sessionId": "session-1",
+            "shapeHash": "shape-1",
+            "tail": [],
+            "timestamp": "2026-07-20T01:00:02Z",
+            "version": "2.1.0",
+        },
+        {
+            "type": "api-request-blob",
+            "agentId": "worker",
+            "hash": "blob-1",
+            "message": {"role": "user", "content": "sub-agent request body"},
+            "sessionId": "session-1",
+        },
+        {
+            "type": "assistant",
+            "sessionId": "session-1",
+            "isSidechain": True,
+            "message": {"content": "sub-agent response"},
+        },
+    )
+
+    result, transcript = _generate_one_source(source, tmp_path / "archive")
+
+    assert result.failures == ()
+    output = transcript.read_text(encoding="utf-8")
+    assert "| sub-agent-traffic | 4 |" in output
+    assert "sub-agent request parameters" not in output
+    assert "sub-agent request body" not in output
+
+
+def test_sidechain_shard_rejects_record_that_names_no_session(
+    tmp_path: Path,
+) -> None:
+    source = _write_sidechain_shard(
+        _write_claude_source(tmp_path / "source.jsonl", "human dialogue"),
+        {
+            "type": "api-request-blob",
+            "agentId": "worker",
+            "hash": "blob-1",
+            "message": {"role": "user", "content": "unowned request body"},
+        },
+    )
+
+    result, transcript = _generate_one_source(source, tmp_path / "archive")
+
+    assert result.failed == 1
+    assert not transcript.exists()
+
+
 def test_codex_subagent_rollout_is_counted_but_never_rendered(
     tmp_path: Path,
 ) -> None:

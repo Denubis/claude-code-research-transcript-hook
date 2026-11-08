@@ -37,6 +37,7 @@ _HARNESS_ENVELOPES = (
     "<bash-stdout>",
     "<command-message>",
 )
+_DIALOGUE_RECORD_TYPES = frozenset({"user", "assistant"})
 _OPERATIONAL_RECORD_TYPES = frozenset(
     {
         "agent-setting",
@@ -476,22 +477,52 @@ def adapt_claude_records(
     )
 
 
+def _validate_shard_identity(
+    record: RawRecord,
+    *,
+    session_id: str,
+    source_path: Path,
+) -> None:
+    """Require a shard record to name its parent session and no other.
+
+    Dialogue and request records name it as ``sessionId``; a forked
+    sub-agent's ``fork-context-ref`` record names it as ``parentSessionId``.
+    """
+    canonical = _optional_string(record.value.get("sessionId"))
+    parent = _optional_string(record.value.get("parentSessionId"))
+    if canonical is None and parent is None:
+        raise AdapterError(
+            f"Claude sidechain shard {source_path} line {record.order} names no session"
+        )
+    if canonical is not None and canonical != session_id:
+        raise AdapterError(
+            f"Claude sidechain shard {source_path} line {record.order} "
+            f"has canonical sessionId {canonical}"
+        )
+    if parent is not None and parent != session_id:
+        raise AdapterError(
+            f"Claude sidechain shard {source_path} line {record.order} has parentSessionId {parent}"
+        )
+
+
 def sidechain_shard_omission(
     records: Iterable[RawRecord],
     *,
     session_id: str,
     source_path: Path,
 ) -> Omission | None:
-    """Validate and count one Claude sub-agent shard without adapting content."""
+    """Validate and count one Claude sub-agent shard without adapting content.
+
+    Every record must name the parent session. Only dialogue records must also
+    carry the sidechain marker; request and fork metadata records do not.
+    """
     materialized = tuple(records)
     for record in materialized:
-        canonical = _optional_string(record.value.get("sessionId"))
-        if canonical != session_id:
-            raise AdapterError(
-                f"Claude sidechain shard {source_path} line {record.order} "
-                f"has canonical sessionId {canonical}"
-            )
-        if record.value.get("isSidechain") is not True:
+        _validate_shard_identity(record, session_id=session_id, source_path=source_path)
+        if (
+            record.value.get("type") in _DIALOGUE_RECORD_TYPES
+            and record.value.get("isSidechain") is not True
+        ):
             raise AdapterError(
                 f"Claude sidechain shard {source_path} line {record.order} "
                 "is not marked isSidechain true"
