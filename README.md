@@ -62,6 +62,22 @@ Gitleaks is required and resolved from `--gitleaks`, `GITLEAKS`, `PATH`, or the
 configured pre-commit environment. Generation fails closed if no scanner is
 available or a rendered candidate contains a secret finding.
 
+Session and message IDs are not treated as keys. Before scanning, the archiver
+hides exact UUIDs that source records assign themselves: the session's message
+and session IDs, its sub-agent records' IDs, and the IDs of the other sessions in
+the run. The published transcript keeps them. Annotation re-reads the source logs
+named in the transcript to learn the same IDs. List an ID quoted from elsewhere in
+the redaction overlay (`ai_transcripts/redactions.toml`, or `--redactions`):
+
+```toml
+[[allowed_ids]]
+id = "c987c236-249a-4f75-82e1-8a3d3896cc71"
+reason = "message ID quoted from another session"
+```
+
+Each entry must be exactly one UUID with a one-line reason. A UUID that is part
+of a longer token, such as `sk-<id>` or `<id>.<signature>`, is still scanned.
+
 ## Annotate a transcript
 
 After generation, ask Agy to annotate only the rendered, redacted transcript:

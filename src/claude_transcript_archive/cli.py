@@ -52,8 +52,11 @@ from .redaction import (
     ProcessRunner,
     RedactionRule,
     SecretFinding,
+    mask_known_ids,
     normalize_scanner_error,
+    parse_allowed_ids,
     parse_redactions,
+    record_ids,
     redact_records,
 )
 from .render import RenderedPart, render_session
@@ -270,9 +273,10 @@ def _adapt(
 def _scan_parts(
     parts: tuple[RenderedPart, ...],
     scanner: CandidateScanner,
+    known_ids: frozenset[str] = frozenset(),
 ) -> None:
     for part in parts:
-        findings = scanner.scan(part.content)
+        findings = scanner.scan(mask_known_ids(part.content, known_ids))
         if not findings:
             continue
         finding = findings[0]
@@ -654,17 +658,19 @@ def _generate_one(
     rules: tuple[RedactionRule, ...],
     scanner: CandidateScanner,
     loader: Callable[[Path], tuple[RawRecord, ...]],
+    shared_ids: frozenset[str],
 ) -> tuple[tuple[Path, ...], int]:
     before = _current_stamps(source)
     records = loader(source.path)
+    shard_records = tuple((path, loader(path)) for path in source.sidechain_shards)
     sidechain_omissions = tuple(
         omission
-        for path in source.sidechain_shards
+        for path, records_in_shard in shard_records
         if (
             omission := _sidechain_omission(
                 source,
                 path,
-                loader(path),
+                records_in_shard,
             )
         )
         is not None
@@ -701,7 +707,10 @@ def _generate_one(
     )
     if current_annotation is not None:
         parts = (_annotation_part(parts[0], current_annotation),)
-    _scan_parts(parts, scanner)
+    known_ids = shared_ids | record_ids(
+        (*records, *(record for _, shard in shard_records for record in shard))
+    )
+    _scan_parts(parts, scanner, known_ids)
     outputs = _publish_parts(source, parts, archive_root)
     return outputs, sum(len(part.content.encode()) for part in parts)
 
@@ -732,6 +741,7 @@ def generate_sources(
     rules: tuple[RedactionRule, ...],
     scanner: CandidateScanner,
     loader: Callable[[Path], tuple[RawRecord, ...]] = load_raw_records,
+    allowed_ids: frozenset[str] = frozenset(),
 ) -> GenerationResult:
     """Generate every changed source and preserve safe per-source failures."""
     previous = _load_state(state_path)
@@ -741,6 +751,7 @@ def generate_sources(
     rendered = 0
     skipped = 0
     bytes_written = 0
+    shared_ids = allowed_ids | frozenset(source.session_id for source in sources)
     for source in sources:
         key = _source_key(source)
         try:
@@ -767,6 +778,7 @@ def generate_sources(
                 rules=rules,
                 scanner=scanner,
                 loader=loader,
+                shared_ids=shared_ids,
             )
             final_stamps = _current_stamps(source)
             next_sources[key] = _state_entry(
@@ -802,9 +814,48 @@ def generate_sources(
     )
 
 
-def _load_rules(path: Path) -> tuple[RedactionRule, ...]:
+def _load_overlay(
+    explicit: Path | None,
+    archive_root: Path,
+) -> tuple[tuple[RedactionRule, ...], frozenset[str]]:
+    """Load redaction rules and allowed IDs from the explicit or default overlay."""
+    path = explicit or archive_root / "redactions.toml"
+    if explicit is None and not path.exists():
+        return (), frozenset()
     with path.open("rb") as source:
-        return parse_redactions(tomllib.load(source))
+        document = tomllib.load(source)
+    return parse_redactions(document), parse_allowed_ids(document)
+
+
+def _annotation_known_ids(
+    content: str,
+    *,
+    archive_root: Path,
+    redactions: Path | None,
+) -> frozenset[str]:
+    """Return the IDs generation hid from the scanner, re-read from their sources.
+
+    A source log that no longer exists contributes nothing, so the scan is
+    stricter rather than skipped.
+    """
+    lines, closing = _front_matter(content)
+    named: list[Path] = []
+    source_file = _front_matter_value(lines, closing, "source_file")
+    if isinstance(source_file, str):
+        named.append(Path(source_file))
+    shard_files = _front_matter_value(lines, closing, "sidechain_source_files")
+    if isinstance(shard_files, list):
+        named.extend(
+            Path(shard) for shard in cast("list[object]", shard_files) if isinstance(shard, str)
+        )
+    records = tuple(record for path in named if path.is_file() for record in load_raw_records(path))
+    published = frozenset(
+        directory.name
+        for directory in (archive_root / "sessions").glob("*/*")
+        if directory.is_dir()
+    )
+    _, allowed = _load_overlay(redactions, archive_root)
+    return published | allowed | record_ids(records)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -969,11 +1020,10 @@ def _archive_root(options: argparse.Namespace, runner: ProcessRunner) -> Path:
 
 
 def _annotation_paths(
-    options: argparse.Namespace,
-    runner: ProcessRunner,
+    archive_root: Path,
     source: SourceDescriptor,
 ) -> tuple[Path, Path]:
-    session_directory = _safe_session_directory(_archive_root(options, runner), source)
+    session_directory = _safe_session_directory(archive_root, source)
     return session_directory / "transcript.md", session_directory / "annotations.json"
 
 
@@ -983,7 +1033,8 @@ def _run_annotate(options: argparse.Namespace) -> int:
         sys.stderr.write("annotate requires --tool and --session-id\n")
         return 1
     runner: ProcessRunner = SubprocessRunner()
-    transcript, sidecar_path = _annotation_paths(options, runner, source)
+    archive_root = _archive_root(options, runner)
+    transcript, sidecar_path = _annotation_paths(archive_root, source)
     try:
         sidecar = _request_annotation(
             transcript,
@@ -1002,6 +1053,11 @@ def _run_annotate(options: argparse.Namespace) -> int:
                 _candidate_part("annotations.json", sidecar_content),
             ),
             scanner,
+            _annotation_known_ids(
+                current,
+                archive_root=archive_root,
+                redactions=options.redactions,
+            ),
         )
         _publish_annotation(
             transcript,
@@ -1022,7 +1078,8 @@ def _run_review_annotations(options: argparse.Namespace) -> int:
         sys.stderr.write("review-annotations requires --tool and --session-id\n")
         return 1
     runner: ProcessRunner = SubprocessRunner()
-    transcript, sidecar_path = _annotation_paths(options, runner, source)
+    archive_root = _archive_root(options, runner)
+    transcript, sidecar_path = _annotation_paths(archive_root, source)
     try:
         current = transcript.read_text(encoding="utf-8")
         base = strip_annotation_section(current)
@@ -1039,6 +1096,11 @@ def _run_review_annotations(options: argparse.Namespace) -> int:
                 _candidate_part("annotations.json", sidecar_content),
             ),
             scanner,
+            _annotation_known_ids(
+                current,
+                archive_root=archive_root,
+                redactions=options.redactions,
+            ),
         )
         _publish_annotation(
             transcript,
@@ -1097,12 +1159,7 @@ def _run_generate(options: argparse.Namespace) -> int:
                 failure for failure in discovery.failures if failure.tool == options.source
             ),
         )
-    redactions_path = options.redactions or archive_root / "redactions.toml"
-    rules = (
-        ()
-        if options.redactions is None and not redactions_path.exists()
-        else _load_rules(redactions_path)
-    )
+    rules, allowed_ids = _load_overlay(options.redactions, archive_root)
     result = generate_sources(
         discovery.sources,
         archive_root=archive_root,
@@ -1110,6 +1167,7 @@ def _run_generate(options: argparse.Namespace) -> int:
         / (".state.json" if options.source == "all" else f".state-{options.source}.json"),
         rules=rules,
         scanner=scanner,
+        allowed_ids=allowed_ids,
     )
     unreadable = tuple(
         SourceFailure(

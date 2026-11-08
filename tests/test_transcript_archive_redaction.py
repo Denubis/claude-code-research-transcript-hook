@@ -14,9 +14,40 @@ from claude_transcript_archive.redaction import (
     RedactionError,
     RedactionRule,
     digest_value,
+    parse_allowed_ids,
     parse_redactions,
     redact_records,
 )
+
+_LISTED_ID = "c987c236-249a-4f75-82e1-8a3d3896cc71"
+
+
+def test_overlay_allowlist_is_read_beside_redactions() -> None:
+    document = {
+        "redactions": [],
+        "allowed_ids": [{"id": _LISTED_ID, "reason": "message ID quoted from another session"}],
+    }
+
+    assert parse_redactions(document) == ()
+    assert parse_allowed_ids(document) == frozenset({_LISTED_ID})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "sk-live-0123456789abcdef0123456789", "reason": "not an ID"},
+        {"id": f"{_LISTED_ID}.c2lnbmF0dXJl", "reason": "signed token"},
+        {"id": _LISTED_ID},
+        {"id": _LISTED_ID, "reason": "two\nlines"},
+        {"id": _LISTED_ID, "reason": "scoped", "session_id": "session-1"},
+    ],
+    ids=["not-a-uuid", "uuid-inside-token", "no-reason", "multi-line-reason", "unknown-field"],
+)
+def test_overlay_allowlist_accepts_only_bare_uuids_with_one_line_reasons(
+    entry: dict[str, object],
+) -> None:
+    with pytest.raises(RedactionError):
+        parse_allowed_ids({"allowed_ids": [entry]})
 
 
 class _FindingRunner:

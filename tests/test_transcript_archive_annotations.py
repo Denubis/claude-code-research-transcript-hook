@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 import claude_transcript_archive.cli as transcript_archive_cli
 from claude_transcript_archive.annotations import (
     ANNOTATION_END,
@@ -390,6 +392,159 @@ def test_review_annotations_marks_current_sidecar_without_calling_agy_again(
     assert sidecar["review_status"] == "reviewed"
     assert "- Review: reviewed" in transcript.read_text(encoding="utf-8")
     assert len(agy_requests) == 1
+
+
+_OWN_MESSAGE = "73c855ed-be6f-4031-aa41-301348610e5b"
+_LISTED_ID = "c987c236-249a-4f75-82e1-8a3d3896cc71"
+
+
+class _FlaggingAgyRunner(_AgyRunner):
+    """Agy double whose Gitleaks call flags every line holding one value."""
+
+    def __init__(self, structured_output: dict[str, object], flagged: str) -> None:
+        super().__init__(structured_output)
+        self.flagged = flagged
+
+    def run(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        input_text: str | None = None,
+        timeout_seconds: int,
+        cwd: Path | None = None,
+    ) -> ProcessResult:
+        if arguments[0] == "/bin/true":
+            assert input_text is not None
+            for line_number, line in enumerate(input_text.splitlines(), start=1):
+                if self.flagged in line:
+                    report = [
+                        {
+                            "RuleID": "generic-api-key",
+                            "StartLine": line_number,
+                            "EndLine": line_number,
+                        }
+                    ]
+                    return ProcessResult(returncode=7, stdout=json.dumps(report), stderr="")
+            return ProcessResult(returncode=0, stdout="[]", stderr="")
+        return super().run(
+            arguments,
+            input_text=input_text,
+            timeout_seconds=timeout_seconds,
+            cwd=cwd,
+        )
+
+
+def _generate_transcript_citing(tmp_path: Path, cited: str) -> tuple[Path, SourceDescriptor]:
+    archive_root = tmp_path / "archive"
+    source_path = tmp_path / "source.jsonl"
+    records = (
+        {
+            "type": "user",
+            "sessionId": "session-1",
+            "uuid": _OWN_MESSAGE,
+            "timestamp": "2026-08-18T00:00:00Z",
+            "message": {"role": "user", "content": "yes, we escape literals"},
+        },
+        {
+            "type": "assistant",
+            "sessionId": "session-1",
+            "uuid": "8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d",
+            "timestamp": "2026-08-18T00:00:01Z",
+            "message": {"content": f"Recorded Brian's escaping answer, {cited}."},
+        },
+    )
+    source_path.write_text(
+        "".join(f"{json.dumps(record)}\n" for record in records),
+        encoding="utf-8",
+    )
+    stat = source_path.stat()
+    source = SourceDescriptor(
+        tool="claude",
+        session_id="session-1",
+        path=source_path,
+        working_directories=("/repo",),
+        stamp=SourceStamp(size=stat.st_size, mtime_ns=stat.st_mtime_ns),
+    )
+    generated = generate_sources(
+        (source,),
+        archive_root=archive_root,
+        state_path=archive_root / ".state.json",
+        rules=(),
+        scanner=_CleanScanner(),
+    )
+    assert generated.failures == ()
+    (archive_root / "redactions.toml").write_text(
+        f'[[allowed_ids]]\nid = "{_LISTED_ID}"\nreason = "message ID from another session"\n',
+        encoding="utf-8",
+    )
+    return archive_root, source
+
+
+@pytest.mark.parametrize(
+    "cited",
+    [_OWN_MESSAGE, _LISTED_ID],
+    ids=["id-from-source-log", "id-from-overlay-allowlist"],
+)
+def test_annotate_and_review_treat_known_ids_as_ids(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+    cited: str,
+) -> None:
+    archive_root, _ = _generate_transcript_citing(tmp_path, cited)
+    session_directory = archive_root / "sessions" / "claude" / "session-1"
+    runner = _FlaggingAgyRunner(
+        _structured_output(locator=f"line 1, id {_OWN_MESSAGE}"),
+        cited,
+    )
+    monkeypatch.setattr(transcript_archive_cli, "SubprocessRunner", lambda: runner)
+
+    annotated = main(_annotate_arguments(archive_root))
+    annotate_error = capsys.readouterr().err
+    reviewed = main(
+        [
+            "review-annotations",
+            "--archive-root",
+            str(archive_root),
+            "--tool",
+            "claude",
+            "--session-id",
+            "session-1",
+            "--gitleaks",
+            "/bin/true",
+        ]
+    )
+    review_error = capsys.readouterr().err
+
+    assert annotated == 0, annotate_error
+    assert reviewed == 0, review_error
+    rendered = (session_directory / "transcript.md").read_text(encoding="utf-8")
+    assert "## Session annotations" in rendered
+    assert f"escaping answer, {cited}." in rendered
+
+
+def test_annotate_without_its_source_log_still_scans_the_logs_ids(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    archive_root, source = _generate_transcript_citing(tmp_path, _OWN_MESSAGE)
+    session_directory = archive_root / "sessions" / "claude" / "session-1"
+    transcript = session_directory / "transcript.md"
+    original = transcript.read_text(encoding="utf-8")
+    source.path.unlink()
+    runner = _FlaggingAgyRunner(
+        _structured_output(locator=f"line 1, id {_OWN_MESSAGE}"),
+        _OWN_MESSAGE,
+    )
+    monkeypatch.setattr(transcript_archive_cli, "SubprocessRunner", lambda: runner)
+
+    exit_code = main(_annotate_arguments(archive_root))
+
+    assert exit_code == 1
+    assert "generic-api-key" in capsys.readouterr().err
+    assert transcript.read_text(encoding="utf-8") == original
+    assert not (session_directory / "annotations.json").exists()
 
 
 def test_annotation_markers_quoted_in_dialogue_are_not_treated_as_generated_content() -> None:

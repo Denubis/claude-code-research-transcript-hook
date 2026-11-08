@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 import claude_transcript_archive.cli as transcript_archive_cli
 from claude_transcript_archive.cli import (
     format_discovery_exclusions,
@@ -530,6 +532,158 @@ def test_sidechain_shard_rejects_record_that_names_no_session(
     assert not transcript.exists()
 
 
+_MAIN_SESSION = "5b0c6f8e-3d2a-4c71-9e44-0a8f2b7d1c39"
+_OTHER_SESSION = "2f6a9c1e-7b3d-4e58-a0c2-9d4e6f8b1a37"
+_OWN_MESSAGE = "73c855ed-be6f-4031-aa41-301348610e5b"
+_SUB_AGENT_MESSAGE = "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f"
+_FOREIGN_UUID = "1b4e28ba-2fa1-41d2-883f-0016d3cca427"
+
+
+class _ValueScanner:
+    """Flag every line holding one of the given values, as Gitleaks flags a key."""
+
+    def __init__(self, *values: str) -> None:
+        self.values = values
+
+    def scan(self, candidate: str) -> tuple[SecretFinding, ...]:
+        for line_number, line in enumerate(candidate.splitlines(), start=1):
+            if any(value in line for value in self.values):
+                return (
+                    SecretFinding(
+                        rule_id="generic-api-key",
+                        start_line=line_number,
+                        end_line=line_number,
+                    ),
+                )
+        return ()
+
+
+def _write_claude_session(
+    root: Path,
+    session_id: str,
+    *records: dict[str, object],
+    shard_records: tuple[dict[str, object], ...] = (),
+) -> SourceDescriptor:
+    # The file stem is not the session ID: _ValueScanner flags a value anywhere
+    # on a line, including the rendered source_file path, which Gitleaks does not.
+    path = root / f"{session_id[:8]}-source.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(f"{json.dumps({'sessionId': session_id, **record})}\n" for record in records),
+        encoding="utf-8",
+    )
+    shards: tuple[Path, ...] = ()
+    if shard_records:
+        shard = root / session_id / "subagents" / "agent-worker.jsonl"
+        shard.parent.mkdir(parents=True)
+        shard.write_text(
+            "".join(
+                f"{json.dumps({'sessionId': session_id, 'isSidechain': True, **record})}\n"
+                for record in shard_records
+            ),
+            encoding="utf-8",
+        )
+        shards = (shard,)
+    stat = path.stat()
+    return SourceDescriptor(
+        tool="claude",
+        session_id=session_id,
+        path=path,
+        working_directories=("/repo",),
+        stamp=SourceStamp(size=stat.st_size, mtime_ns=stat.st_mtime_ns),
+        sidechain_shards=shards,
+    )
+
+
+def _sessions_citing(root: Path, cited: str) -> tuple[SourceDescriptor, ...]:
+    main = _write_claude_session(
+        root,
+        _MAIN_SESSION,
+        {
+            "type": "user",
+            "uuid": _OWN_MESSAGE,
+            "message": {"role": "user", "content": "yes, we escape literals"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "8a7b6c5d-4e3f-4a1b-9c8d-7e6f5a4b3c2d",
+            "message": {"content": f"Recorded Brian's first escaping answer, {cited}."},
+        },
+        shard_records=(
+            {
+                "type": "assistant",
+                "uuid": _SUB_AGENT_MESSAGE,
+                "message": {"content": "sub-agent finding"},
+            },
+        ),
+    )
+    other = _write_claude_session(
+        root,
+        _OTHER_SESSION,
+        {
+            "type": "user",
+            "uuid": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "message": {"role": "user", "content": "another session"},
+        },
+    )
+    return main, other
+
+
+@pytest.mark.parametrize(
+    "cited",
+    [_OWN_MESSAGE, _SUB_AGENT_MESSAGE, _OTHER_SESSION],
+    ids=["own-message", "sub-agent-message", "other-session"],
+)
+def test_cited_session_or_message_id_is_published_not_treated_as_key(
+    tmp_path: Path,
+    cited: str,
+) -> None:
+    archive = tmp_path / "archive"
+
+    result = generate_sources(
+        _sessions_citing(tmp_path / "store", cited),
+        archive_root=archive,
+        state_path=archive / ".state.json",
+        rules=(),
+        scanner=_ValueScanner(cited),
+    )
+
+    assert result.failures == ()
+    output = (archive / "sessions" / "claude" / _MAIN_SESSION / "transcript.md").read_text(
+        encoding="utf-8"
+    )
+    assert f"first escaping answer, {cited}." in output
+
+
+@pytest.mark.parametrize(
+    ("cited", "flagged"),
+    [
+        (_FOREIGN_UUID, _FOREIGN_UUID),
+        (f"token=sk-{_OWN_MESSAGE}", _OWN_MESSAGE),
+        (f"cookie={_OWN_MESSAGE}.c2lnbmF0dXJl", _OWN_MESSAGE),
+    ],
+    ids=["unknown-uuid", "known-id-prefixed-in-token", "known-id-signed-in-token"],
+)
+def test_flagged_value_that_is_not_exactly_a_known_id_still_blocks_publication(
+    tmp_path: Path,
+    cited: str,
+    flagged: str,
+) -> None:
+    archive = tmp_path / "archive"
+
+    result = generate_sources(
+        _sessions_citing(tmp_path / "store", cited),
+        archive_root=archive,
+        state_path=archive / ".state.json",
+        rules=(),
+        scanner=_ValueScanner(flagged),
+    )
+
+    assert [failure.session_id for failure in result.failures] == [_MAIN_SESSION]
+    assert "generic-api-key" in result.failures[0].reason
+    assert not (archive / "sessions" / "claude" / _MAIN_SESSION / "transcript.md").exists()
+
+
 def test_codex_subagent_rollout_is_counted_but_never_rendered(
     tmp_path: Path,
 ) -> None:
@@ -941,3 +1095,92 @@ def test_generate_renders_other_sessions_when_one_source_has_an_invalid_line(
     assert "torn.jsonl" in failure_lines[0]
     assert "line 2" in failure_lines[0]
     assert "cut off" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    ("listed", "exit_status", "published"),
+    [(True, 0, True), (False, 1, False)],
+    ids=["listed", "not-listed"],
+)
+def test_overlay_allowlist_lets_an_id_quoted_from_another_session_publish(
+    tmp_path: Path,
+    capsys,
+    listed: bool,
+    exit_status: int,
+    published: bool,
+) -> None:
+    repository = tmp_path / "repository"
+    claude_root = tmp_path / "claude"
+    codex_root = tmp_path / "codex"
+    archive = tmp_path / "archive"
+    codex_root.mkdir()
+    subprocess.run(("git", "init", "--quiet", str(repository)), check=True)
+    gitleaks = tmp_path / "gitleaks"
+    gitleaks.write_text(
+        "#!/bin/sh\n"
+        f"line=$(grep -n -m1 -F '{_FOREIGN_UUID}' | cut -d: -f1)\n"
+        'if [ -n "$line" ]; then\n'
+        '  printf \'[{"RuleID":"generic-api-key","StartLine":%s,"EndLine":%s}]\' '
+        '"$line" "$line"\n'
+        "  exit 7\n"
+        "fi\n"
+        "echo '[]'\n",
+        encoding="utf-8",
+    )
+    gitleaks.chmod(0o755)
+    project = claude_root / "project"
+    project.mkdir(parents=True)
+    (project / "quoting.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "quoting",
+                "uuid": "user-1",
+                "timestamp": "2026-07-20T01:00:00Z",
+                "cwd": str(repository),
+                "message": {
+                    "role": "user",
+                    "content": f"Brian answered in message {_FOREIGN_UUID} of the other session.",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "redactions.toml"
+    overlay.write_text(
+        (
+            "[[allowed_ids]]\n"
+            f'id = "{_FOREIGN_UUID}"\n'
+            'reason = "message ID quoted from another session"\n'
+        )
+        if listed
+        else "",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--repo",
+            str(repository),
+            "--claude-root",
+            str(claude_root),
+            "--codex-root",
+            str(codex_root),
+            "--archive-root",
+            str(archive),
+            "--redactions",
+            str(overlay),
+            "--gitleaks",
+            str(gitleaks),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    transcript = archive / "sessions" / "claude" / "quoting" / "transcript.md"
+    assert exit_code == exit_status, captured.out + captured.err
+    assert transcript.exists() == published
+    if published:
+        assert f"message {_FOREIGN_UUID} of the other session" in transcript.read_text(
+            encoding="utf-8"
+        )

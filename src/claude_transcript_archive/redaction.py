@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -20,6 +21,30 @@ from .model import (
 )
 
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+# A UUID standing alone: no neighbouring character that a scanner could read
+# as part of the same secret, so a key that merely contains an ID, such as a
+# signed "<id>.<signature>" token, stays visible. A full stop that ends a
+# sentence is not part of the token.
+_STANDALONE_UUID = re.compile(
+    r"(?<![\w.=+/-])"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"(?![\w=+/-]|\.[\w.=+/-])"
+)
+_ID_PLACEHOLDER = "00000000-0000-0000-0000-000000000000"
+_OVERLAY_FIELDS = frozenset({"redactions", "allowed_ids"})
+_ALLOWED_ID_FIELDS = frozenset({"id", "reason"})
+_RECORD_ID_KEYS = (
+    "uuid",
+    "parentUuid",
+    "logicalParentUuid",
+    "leafUuid",
+    "promptId",
+    "sessionId",
+    "parentSessionId",
+    "session_id",
+    "id",
+    "turn_id",
+)
 _RULE_FIELDS = frozenset(
     {
         "tool",
@@ -147,6 +172,13 @@ def _required_string(entry: dict[str, object], key: str) -> str:
     return value
 
 
+def _one_line_reason(entry: dict[str, object]) -> str:
+    reason = _required_string(entry, "reason")
+    if "\n" in reason or "\r" in reason or len(reason) > 120:
+        raise RedactionError("Redaction reason must be one line of at most 120 characters")
+    return reason
+
+
 def _selector(entry: dict[str, object]) -> tuple[int | None, str | None]:
     source_order = entry.get("source_order")
     stable_id = entry.get("stable_id")
@@ -182,9 +214,7 @@ def _parse_rule(entry: object) -> RedactionRule:
     digest = _required_string(entry_value, "digest")
     if _DIGEST_PATTERN.fullmatch(digest) is None:
         raise RedactionError("Redaction digest must be sha256 plus 64 hex digits")
-    reason = _required_string(entry_value, "reason")
-    if "\n" in reason or "\r" in reason or len(reason) > 120:
-        raise RedactionError("Redaction reason must be one line of at most 120 characters")
+    reason = _one_line_reason(entry_value)
     source_tool: SourceTool = "claude" if tool == "claude" else "codex"
     return RedactionRule(
         tool=source_tool,
@@ -197,14 +227,19 @@ def _parse_rule(entry: object) -> RedactionRule:
     )
 
 
-def parse_redactions(document: object) -> tuple[RedactionRule, ...]:
-    """Validate a decoded redactions TOML document."""
+def _overlay_table(document: object) -> dict[str, object]:
     if not isinstance(document, dict):
         raise RedactionError("Redaction overlay must decode to a table")
     document_value = cast("dict[str, object]", document)
-    unknown = set(document_value) - {"redactions"}
+    unknown = set(document_value) - _OVERLAY_FIELDS
     if unknown:
         raise RedactionError(f"Unknown overlay fields: {', '.join(sorted(unknown))}")
+    return document_value
+
+
+def parse_redactions(document: object) -> tuple[RedactionRule, ...]:
+    """Validate a decoded redactions TOML document."""
+    document_value = _overlay_table(document)
     entries = document_value.get("redactions", [])
     if not isinstance(entries, list):
         raise RedactionError("redactions must be an array of tables")
@@ -212,6 +247,33 @@ def parse_redactions(document: object) -> tuple[RedactionRule, ...]:
     if len(set(rules)) != len(rules):
         raise RedactionError("Duplicate redaction rules are not allowed")
     return rules
+
+
+def parse_allowed_ids(document: object) -> frozenset[str]:
+    """Validate the overlay's hand-kept list of IDs that are not secrets.
+
+    Each entry is one exact UUID with a one-line reason, so the list cannot
+    admit a key of any other shape.
+    """
+    entries = _overlay_table(document).get("allowed_ids", [])
+    if not isinstance(entries, list):
+        raise RedactionError("allowed_ids must be an array of tables")
+    allowed: list[str] = []
+    for entry in cast("list[object]", entries):
+        if not isinstance(entry, dict):
+            raise RedactionError("Each allowed ID must be a TOML table")
+        entry_value = cast("dict[str, object]", entry)
+        unknown = set(entry_value) - _ALLOWED_ID_FIELDS
+        if unknown:
+            raise RedactionError(f"Unknown allowed ID fields: {', '.join(sorted(unknown))}")
+        value = _required_string(entry_value, "id")
+        if _STANDALONE_UUID.fullmatch(value) is None:
+            raise RedactionError("An allowed ID must be exactly one UUID")
+        _one_line_reason(entry_value)
+        allowed.append(value)
+    if len(set(allowed)) != len(allowed):
+        raise RedactionError("Duplicate allowed IDs are not allowed")
+    return frozenset(allowed)
 
 
 def _stable_id(record: RawRecord) -> str | None:
@@ -333,6 +395,40 @@ def redact_records(
             )
         )
     return RedactionResult(records=copied, applied=tuple(applied))
+
+
+def record_ids(records: Iterable[RawRecord]) -> frozenset[str]:
+    """Return the session and message IDs that source records assign themselves.
+
+    Only identity fields of a record (and of a Codex payload) count; a UUID
+    that appears in message text or tool input is never an ID by this test.
+    """
+    found: set[str] = set()
+    for record in records:
+        payload = record.value.get("payload")
+        containers: tuple[object, ...] = (record.value, payload)
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            fields = cast("dict[str, object]", container)
+            for key in _RECORD_ID_KEYS:
+                value = fields.get(key)
+                if isinstance(value, str) and _STANDALONE_UUID.fullmatch(value):
+                    found.add(value)
+    return frozenset(found)
+
+
+def mask_known_ids(candidate: str, known_ids: frozenset[str]) -> str:
+    """Hide exact known IDs from the secret scanner without moving any line.
+
+    The published candidate keeps every ID; only the scanner's copy is masked.
+    """
+    if not known_ids:
+        return candidate
+    return _STANDALONE_UUID.sub(
+        lambda match: _ID_PLACEHOLDER if match.group(0) in known_ids else match.group(0),
+        candidate,
+    )
 
 
 def _integer(entry: dict[str, object], key: str) -> int:
