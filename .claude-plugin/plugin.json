@@ -1,6 +1,6 @@
 {
   "name": "transcript-archive",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Archive Claude Code and Codex sessions as searchable Markdown with Three-Ps metadata",
 
   "author": {

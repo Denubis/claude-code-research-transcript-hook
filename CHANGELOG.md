@@ -1,5 +1,12 @@
 # Changelog
 
+## transcript-archive 1.0.3
+
+Messages the human types while Claude Code is still working now appear in transcripts.
+
+**Fixed:**
+- Claude Code stores a message typed mid-turn as a `queued_command` attachment, which the archiver dropped as operational. It is now a user turn at the point Claude received it, once. Included: messages Claude Code marks as the human's (`origin.kind` `human`), and unmarked prompts written by Claude Code 2.1.179 or earlier, before it named senders. Messages from other sessions, task notices, coordinators and automatic continuations, and unmarked prompts from later versions, stay omitted.
+
 ## transcript-archive 1.0.2
 
 Sessions no longer fail when Claude Code writes new sub-agent records or when a transcript quotes a session or message ID.
